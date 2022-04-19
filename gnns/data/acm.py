@@ -6,6 +6,7 @@ import numpy as np
 import scipy.io as sio
 import torch
 from dgl.data import DGLDataset
+import dgl.function as fn
 from dgl.data.utils import (_get_dgl_url, download, generate_mask_tensor,
                             idx2mask, load_graphs, save_graphs)
 
@@ -106,6 +107,8 @@ class ACMDataset(DGLDataset):
         self.g.nodes['paper'].data['train_mask'] = train_mask
         self.g.nodes['paper'].data['val_mask'] = val_mask
         self.g.nodes['paper'].data['test_mask'] = test_mask
+        # author顶点特征为关联的paper特征的平均
+        self.g.multi_update_all({'pa': (fn.copy_u('feat', 'm'), fn.mean('m', 'feat'))}, 'sum')
         # 领域特征为one-hot向量
         self.g.nodes['field'].data['feat'] = torch.eye(self.g.num_nodes('field'))
 

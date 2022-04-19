@@ -4,6 +4,7 @@ import dgl
 import numpy as np
 import torch
 
+from .data import *
 
 def set_random_seed(seed):
     """设置Python, numpy, PyTorch的随机数种子

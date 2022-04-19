@@ -6,15 +6,16 @@ import torch
 import torch.nn.functional as F
 from torch.nn.utils import clip_grad_norm_
 import torch.optim as optim
-from gnns.data import ACMDataset
+from gnns.data import ACMDataset, DBLPFourAreaDataset
 from gnns.hgt.model import HGT
 from sklearn.cluster import KMeans
 from sklearn.metrics import (adjusted_rand_score, f1_score,
                              normalized_mutual_info_score)
-from utils import set_random_seed
+from gnns.utils import set_random_seed
 
 DATASET = {
-    'acm': ACMDataset
+    'acm': ACMDataset,
+    'dblp': DBLPFourAreaDataset
 }
 
 
@@ -28,6 +29,7 @@ def train(args):
     train_mask = g.nodes[predict_ntype].data['train_mask']
     val_mask = g.nodes[predict_ntype].data['val_mask']
     test_mask = g.nodes[predict_ntype].data['test_mask']
+    num_classes = data.num_classes
 
     model = HGT(
         {ntype: g.nodes[ntype].data['feat'].shape[1] for ntype in g.ntypes},
@@ -51,22 +53,18 @@ def train(args):
         scheduler.step()
 
         train_scores = micro_macro_f1_score(logits[train_mask], labels[train_mask])
-        val_scores = evaluate(model, g, features, labels, val_mask, micro_macro_f1_score)
-        test_scores = evaluate(model, g, features, labels, test_mask, micro_macro_f1_score)
+        val_scores = micro_macro_f1_score(logits[val_mask], labels[val_mask])
+        # val_scores = evaluate(model, g, features, labels, val_mask, micro_macro_f1_score)
+        test_scores = micro_macro_f1_score(logits[test_mask], labels[test_mask])
+        # test_scores = evaluate(model, g, features, labels, test_mask, micro_macro_f1_score)
         print(metrics.format(epoch, loss.item(), *train_scores, *val_scores, *test_scores))
-    test_scores = evaluate(model, g, features, labels, test_mask, micro_macro_f1_score)
+    test_scores = micro_macro_f1_score(logits[test_mask], labels[test_mask])
     print('Test Micro-F1 {:.4f} | Test Macro-F1 {:.4f}'.format(*test_scores))
-    nmi, ari = node_cluster(embeds[predict_ntype].numpy(), labels.numpy(), data.num_classes())
+    nmi, ari = node_cluster(embeds[predict_ntype].detach().numpy(), labels, num_classes)
     print('Test NMI {:.4f} | Test ARI {:.4f}'.format(nmi, ari))
 
 
 @torch.no_grad()
-def evaluate(model, g, features, labels, mask, score):
-    model.eval()
-    logits = model(g, features)
-    return score(logits[mask], labels[mask])
-
-
 def micro_macro_f1_score(logits, labels):
     """计算Micro-F1和Macro-F1得分
 
@@ -79,6 +77,7 @@ def micro_macro_f1_score(logits, labels):
     micro_f1 = f1_score(labels, prediction, average='micro')
     macro_f1 = f1_score(labels, prediction, average='macro')
     return micro_f1, macro_f1
+
 
 @torch.no_grad()
 def node_cluster(embeds, labels, num_classes):
@@ -94,7 +93,7 @@ def node_cluster(embeds, labels, num_classes):
 def main():
     parser = argparse.ArgumentParser(description='HGT Node Classification')
     parser.add_argument('--seed', type=int, default=1, help='random seed')
-    parser.add_argument('--dataset', choices=['acm', 'imdb'], default='acm', help='dataset')
+    parser.add_argument('--dataset', choices=['acm', 'dblp'], default='acm', help='dataset')
     parser.add_argument('--num-hidden', type=int, default=256, help='number of hidden units')
     parser.add_argument('--num-heads', type=int, default=8, help='number of attention heads')
     parser.add_argument('--num-layers', type=int, default=2, help='number of layers')
