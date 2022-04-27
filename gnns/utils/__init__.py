@@ -6,6 +6,7 @@ import torch
 
 from .data import *
 from .metrics import *
+from .graph_fuse import *
 
 def set_random_seed(seed):
     """设置Python, numpy, PyTorch的随机数种子
