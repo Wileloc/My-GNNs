@@ -1,4 +1,3 @@
-from turtle import forward
 import torch
 import torch.nn as nn
 from dgl.nn.pytorch.conv import GraphConv
@@ -110,7 +109,7 @@ class BiGraphContrastLayer(nn.Module):
         return loss, predict_h
 
 
-class Contrast(nn.Module):
+class ContrastLayer(nn.Module):
     '''
     全图对比学习层
     in_dim: 输入维数
@@ -123,32 +122,82 @@ class Contrast(nn.Module):
             etype: BiGraphContrastLayer(in_dim, hidden_dim, dtype, tem=tem) for _, etype, dtype in etypes
         })
         self.attention = nn.ModuleDict({
-            dtype: Attention(hidden_dim, attn_drop) for _, _, dtype in etypes
+            etype: Attention(hidden_dim, attn_drop) for _, etype, _ in etypes
         })
+        self.rev_etype = {
+            e: next(re for rs, re, rd in etypes if rs == d and rd == s and re != e)
+            for s, e, d in etypes
+        }
     
     def forward(self, g, feat):
         '''
-        :g 异构图
-        :feat 节点特征Dict {ntype: [nfeat]}  
+        :g 异构图"
+        :feat 节点特征Dict 每种类型的顶点在不同关系下(dst作为目标节点)的表示{ntype: {etype: Tensor(N, d)}}
+        return: 二分图对比学习 + 跨关系学习后的节点表征Dict {ntype: {etype: Tensor(N, d)}}, 二分图对比学习的loss
         '''
-        e_feat = {}
+        # e_feat = {}
         n_feat = {}
         local_loss = []
-        for stype, etype, dtype in g.canonical_etypes():
+        for stype, etype, dtype in g.canonical_etypes:
             if dtype not in n_feat:
-                n_feat[dtype] = []
+                n_feat[dtype] = {}
             # 构造二分图 每种边的关系对应一种二分图 {etype: BiGraph}
+            # 二分图的输入特征为, dst节点在当前关系下的表征与src节点在当前关系的reverse关系下的表征
             bigraph = dgl.heterograph({etype: g.edges(etype=etype)})
-            bigraph.nodes[stype].data['h'] = feat[stype]
-            bigraph.nodes[dtype].data['h'] = feat[dtype]
+            bigraph.nodes[stype].data['h'] = feat[stype][self.rev_etype(etype)]
+            bigraph.nodes[dtype].data['h'] = feat[dtype][etype]
             # bi_feat为二分图目标节点的表示, bi_loss为当前二分图的对比损失
             bi_feat, bi_loss = self.bigraphs[etype](bigraph)
-            e_feat[etype] = bi_feat # 记录一下当前关系下的目标节点表示 后面用于跨关系消息传递
-            n_feat[dtype].append(bi_feat) # 同目标类型的节点的局部embedding
+            # e_feat[etype] = bi_feat # 记录一下当前关系下的目标节点表示 后面用于跨关系消息传递
+            n_feat[dtype][etype] = bi_feat # 同目标类型的节点的局部embedding, 同时记录边关系类型, 用于跨关系消息传递
             local_loss.append(bi_loss) # 目前是直接将所有二分图的loss相加作为局部loss TODO 和节点表示的权重结合
+
+        # R-HGNN的做法是对每种关系的节点表示, 为每种关系设置一个注意力向量, 聚合其他关系下的节点表示，传入下一层。
+        cross_feat = {}
         for dtype in n_feat:
-            # [(N, d)] -> (N, M, d)
-            h = torch.stack(n_feat[dtype], dim=1)
-            z = self.attention[dtype](h) #(N, d)
-            n_feat[dtype] = z
-            
+            cross_feat[dtype] = {}
+            for etype in n_feat[dtype]:
+                h = torch.stack([n_feat[dtype][e] for e in n_feat[dtype] if e != etype], dim=1)
+                z = self.attention[etype](h) #(N, d)
+                cross_feat[dtype][etype] = z
+        return cross_feat, local_loss
+
+
+class MyModel(nn.Module):
+    '''
+    :in_dim 输入特征维数
+    :hidden_dim 隐层特征维数
+    :etypes [(stype, etype, dtype)] 边关系三元组
+    :layer 卷积层数
+    :attn_drop Attention Dropout概率
+    '''
+
+    def __init__(self, in_dim, hidden_dim, etypes, layer, attn_drop=0.5) -> None:
+        super().__init__()
+        self.contrast = nn.ModuleList()
+        self.contrast.append(ContrastLayer(in_dim, hidden_dim, etypes))
+        for _ in range(1, layer):
+            self.contrast.append(ContrastLayer(hidden_dim, hidden_dim, etypes))
+        self.attn = Attention(hidden_dim, attn_drop)
+    
+    def forward(self, g, feat):
+        '''
+        :g DGLGraph 异构图
+        :feat 节点特征Dict {ntype: Tensor(N, d_i)}
+        return 节点表征Dict {ntype: Tensor(N, d_h)}
+        '''
+        n_feat = {}
+        for _, etype, dtype in g.canonical_etypes:
+            if dtype not in n_feat:
+                n_feat[dtype] = {}
+            n_feat[dtype][etype] = feat[dtype] # 初始每个关系下的节点特征都相同
+        
+        # L层
+        for layer in self.contrast:
+            n_feat, _ = layer(g, n_feat) # TODO 这里二分图对比的局部损失没有用上
+        # TODO 最后每种关系的节点表征如何结合成统一的节点表示
+        # 先用语义层次的attention试一下
+        z = {}
+        for dtype in n_feat:
+            z[dtype] = self.attn(torch.stack([n_feat[dtype][etype] for etype in n_feat[dtype]], dim=1))
+        return z
