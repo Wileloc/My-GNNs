@@ -5,7 +5,7 @@ from gensim.models import Word2Vec
 from ogb.nodeproppred import DglNodePropPredDataset, Evaluator
 
 from gnns.config import DATA_DIR
-from gnns.data import ACMDataset
+# from gnns.data import ACMDataset
 # from gnnrec.kgrec.data import OAGVenueDataset, OAGFieldDataset
 
 
@@ -20,8 +20,8 @@ def load_data(name, device='cpu', add_reverse_edge=True, reverse_self=True):
     """
     if name == 'ogbn-mag':
         return load_ogbn_mag(device, add_reverse_edge, reverse_self)
-    elif name == 'acm':
-        data = ACMDataset()
+    # elif name == 'acm':
+        # data = ACMDataset()
     # elif name == 'dblp':
     #     data = DBLPDataset()
     # elif name == 'oag-venue':
