@@ -12,6 +12,7 @@ def fuse_graph(g, fuse_way='drop-edge'):
 
 def _drop_graph_edge(g, drop_rate=0.01):
     fuse_g = g.cpu() # copy g
+    fuse_g = fuse_g.to(g.device)
     drop_edge = torch.squeeze(torch.randint(fuse_g.num_edges(), (1, int(drop_rate*fuse_g.num_edges()))))
-    fuse_g.remove_edge(drop_edge)
+    fuse_g.remove_edges(drop_edge.cuda())
     return fuse_g

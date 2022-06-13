@@ -1,3 +1,4 @@
+import time
 import torch
 import torch.nn as nn
 from dgl.nn.pytorch.conv import GraphConv
@@ -54,16 +55,20 @@ class BiGraphContrastLayer(nn.Module):
     def __init__(self, in_dim, hidden_dim, predict_type, fuse_way='drop-edge', tem=0.7):
         super().__init__()
         self.predict_type = predict_type
-        # TODO GCN可以替换成GAT
         self.graph_encoder = GraphConv(in_dim, hidden_dim, norm='right', activation=nn.PReLU())
         self.fuse_way = fuse_way
         self.tem = tem
+        self.neighbor_size = 3
 
-    def _calculate_loss(self, pos_g, pos_feat, neg_g, neg_feat, predict_type_id):
-        pos_nodes = pos_g.filter_nodes(lambda nodes: (nodes.data['_TYPE'] == predict_type_id))
+    def _calculate_loss(self, pos_g, pos_feat, neg_g, neg_feat, predict_type_id=None, predict_node_id=None):
+        if predict_type_id is not None:
+            pos_nodes = pos_g.filter_nodes(lambda nodes: (nodes.data['_TYPE'] == predict_type_id))
+            neg_nodes = neg_g.filter_nodes(lambda nodes: (nodes.data['_TYPE'] == predict_type_id))
+        else:
+            pos_nodes = pos_g.filter_nodes(lambda nodes: (nodes.data['_ID'] <= predict_node_id))
+            neg_nodes = neg_g.filter_nodes(lambda nodes: (nodes.data['_ID'] <= predict_node_id))
         # (N, hid_d)
         h_pos = pos_feat[pos_nodes]
-        neg_nodes = neg_g.filter_nodes(lambda nodes: (nodes.data['_TYPE'] == predict_type_id))
         # (N, hid_d)
         h_neg = neg_feat[neg_nodes]
 
@@ -71,42 +76,51 @@ class BiGraphContrastLayer(nn.Module):
         pos_loss = F.cosine_similarity(h_pos, h_neg)
 
         # {节点id: [邻居embedding]}
-        pos_nodes_nei = {pos_node.item(): pos_feat[pos_g.in_edges(pos_node)] for pos_node in pos_nodes}
-        neg_nodes_nei = {neg_node.item(): neg_feat[neg_g.in_edges(neg_node)] for neg_node in neg_nodes}
+        pos_nei_feat = pos_feat[pos_g.in_edges(pos_nodes)[0]]
+        neg_nei_feat = neg_feat[neg_g.in_edges(neg_nodes)[0]]
+        neg_ebd_feat = neg_feat[pos_g.in_edges(pos_nodes)[1]]
+        pos_ebd_feat = pos_feat[neg_g.in_edges(neg_nodes)[1]]
 
         neg_loss = []
         # 另一视图的邻居节点为负样本
-        for node, feat in zip(pos_nodes, h_pos):
-            neg_loss.append(torch.sum(F.cosine_similarity(feat, neg_nodes_nei[node.item()])))
-        for node, feat in zip(neg_nodes, h_neg):
-            neg_loss.append(torch.sum(F.cosine_similarity(feat, pos_nodes_nei[node.item()])))
+        neg_loss.append(F.cosine_similarity(pos_nei_feat, neg_ebd_feat))
+        neg_loss.append(F.cosine_similarity(neg_nei_feat, pos_ebd_feat))
         # (2N, 1)
-        neg_loss = torch.stack(neg_loss)
+        neg_loss = torch.cat(neg_loss, dim=0)
         
-        total_loss = torch.log(torch.sum(torch.exp(torch.cat([pos_loss, neg_loss], dim=0)))) - torch.sum(pos_loss)
+        total_loss = torch.log(torch.sum(torch.exp(torch.cat([pos_loss, neg_loss], dim=0))) - torch.sum(pos_loss))
         return total_loss, h_pos
 
     def forward(self, g):
         '''
-        :g 二分图 需要带节点的特征feat
+        :g 二分图
+        :feat (tensor(N_src, d_in), tensor(N_dst, d_in)) 输入特征
         '''
-        predict_type_id = g.ntypes.index(self.predict_type)
-        # 扰动
-        g_neg = fuse_graph(g, self.fuse_way)
+        with g.local_scope():
+            # feat_src, feat_dst = expand_as_pair(feat, g)
+            # g.srcdata['h'] = feat_src
+            # g.dstdata['h'] = feat_dst
+            # 扰动
+            g_neg = fuse_graph(g, self.fuse_way)
+    
+            # 二分图上先进行GCN 同类型的邻居的重要性相同 TODO 可以改为attention
+            homo_g = dgl.to_homogeneous(g, ndata=['h'])
+            homo_feat = homo_g.ndata['h']
+            homo_g = dgl.add_self_loop(homo_g)
+            h = self.graph_encoder(homo_g, homo_feat)
+            # 扰动的图进行GCN
+            homo_neg_g = dgl.to_homogeneous(g_neg, ndata=['h'])
+            homo_neg_feat = homo_neg_g.ndata['h']
+            homo_neg_g = dgl.add_self_loop(homo_neg_g)
+            neg_g_h = self.graph_encoder(homo_neg_g, homo_neg_feat)
 
-        # 二分图上先进行GCN 同类型了邻居的重要性相同 TODO 可以改为attention
-        homo_g = dgl.to_homogeneous(g, ndata=['feat'])
-        homo_feat = homo_g.ndata['feat']
-        homo_g = dgl.add_self_loop(homo_g)
-        h = self.graph_encoder(homo_g, homo_feat)
-        # 扰动的图进行GCN
-        homo_neg_g = dgl.to_homogeneous(g_neg, ndata=['feat'])
-        homo_neg_feat = homo_neg_g.ndata['feat']
-        homo_neg_g = dgl.add_self_loop(homo_neg_g)
-        neg_g_h = self.graph_encoder(homo_neg_g, homo_neg_feat)
-
-        loss, predict_h = self._calculate_loss(homo_g, h, homo_neg_g, neg_g_h, predict_type_id)
-        return loss, predict_h
+            if len(g.ntypes) == 1:
+                predict_node_id = torch.max(g.edges(etype=g.etypes[0])[1])
+                loss, predict_h = self._calculate_loss(homo_g, h, homo_neg_g, neg_g_h, predict_node_id=predict_node_id)
+            else:
+                predict_type_id = g.ntypes.index(self.predict_type)
+                loss, predict_h = self._calculate_loss(homo_g, h, homo_neg_g, neg_g_h, predict_type_id=predict_type_id)
+            return loss, predict_h
 
 
 class ContrastLayer(nn.Module):
@@ -146,9 +160,13 @@ class ContrastLayer(nn.Module):
             # 构造二分图 每种边的关系对应一种二分图 {etype: BiGraph}
             # 二分图的输入特征为, dst节点在当前关系下的表征与src节点在当前关系的reverse关系下的表征
             bigraph = dgl.heterograph({(stype, etype, dtype): g.edges(etype=etype)})
-            # TODO 采样得到的图并不是对称的，而传入的feat是根据src节点来的。
-            bigraph.nodes[stype].data['h'] = feat[stype][self.rev_etype[etype]][:torch.max(g.edges(etype=etype)[0])+1]
-            bigraph.nodes[dtype].data['h'] = feat[dtype][etype][:torch.max(g.edges(etype=etype)[1])+1]
+            # 选择这条关系包含的节点
+            # TODO 这里还是有问题，应当不需要用到目标顶点的特征，目标顶点的特征是通过消息聚合得到的。输入只有第一层的源顶点特征。
+            if stype == dtype:
+                bigraph.nodes[stype].data['h'] = feat[stype][self.rev_etype[etype]][:torch.max(torch.max(g.edges(etype=etype)[0])+1, torch.max(g.edges(etype=etype)[1])+1)]
+            else:
+                bigraph.nodes[stype].data['h'] = feat[stype][self.rev_etype[etype]][:torch.max(g.edges(etype=etype)[0])+1]
+                bigraph.nodes[dtype].data['h'] = feat[dtype][etype][:torch.max(g.edges(etype=etype)[1])+1]
             # bi_feat为二分图目标节点的表示, bi_loss为当前二分图的对比损失
             bi_loss, bi_feat = self.bigraphs[etype](bigraph)
             # e_feat[etype] = bi_feat # 记录一下当前关系下的目标节点表示 后面用于跨关系消息传递
@@ -158,7 +176,17 @@ class ContrastLayer(nn.Module):
         # R-HGNN的做法是对每种关系的节点表示, 为每种关系设置一个注意力向量, 聚合其他关系下的节点表示，传入下一层。
         cross_feat = {}
         for dtype in n_feat:
+            for etype in n_feat[dtype]:
+                nodes_num = g.num_dst_nodes(dtype)
+                if len(n_feat[dtype][etype]) < nodes_num:
+                    n_feat[dtype][etype] = torch.cat([n_feat[dtype][etype], torch.randn((nodes_num-len(n_feat[dtype][etype]),64)).cuda()])
+                elif len(n_feat[dtype][etype]) > nodes_num:
+                    n_feat[dtype][etype] = n_feat[dtype][etype][:nodes_num]
+        for dtype in n_feat:
             cross_feat[dtype] = {}
+            if len(n_feat[dtype]) == 1:
+                cross_feat[dtype] = n_feat[dtype]
+                continue
             for etype in n_feat[dtype]:
                 h = torch.stack([n_feat[dtype][e] for e in n_feat[dtype] if e != etype], dim=1)
                 z = self.attention[etype](h) #(N, d)
@@ -206,5 +234,5 @@ class MyModel(nn.Module):
         # 先用语义层次的attention试一下
         z = {}
         for dtype in n_feat:
-            z[dtype] = self.attn(torch.stack([n_feat[dtype][etype] for etype in n_feat[dtype]], dim=1))
+            z[dtype] = self.predict(self.attn(torch.stack([n_feat[dtype][etype] for etype in n_feat[dtype]], dim=1)))
         return z, co_loss

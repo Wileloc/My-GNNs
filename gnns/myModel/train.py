@@ -16,6 +16,7 @@ def train(args):
     device = get_device(args.device)
     data, g, _, labels, predict_ntype, train_idx, val_idx, test_idx, evaluator = \
         load_data(args.dataset, device)
+    print("开始添加顶点特征")
     add_node_feat(g, 'pretrained', args.node_embed_path, True)
     # add_node_feat(g, 'random')
 
@@ -40,7 +41,7 @@ def train(args):
             # blocks 表示对每一层的采样，逻辑应该是从这一批次要学习的顶点开始，依次采样倒数第一层，倒数第二层...的节点。
             batch_logits, batch_co_loss = model(blocks, blocks[0].srcdata['feat'])
             batch_labels = labels[output_nodes[predict_ntype]]
-            sv_loss = F.cross_entropy(batch_logits, batch_labels)
+            sv_loss = F.cross_entropy(batch_logits[predict_ntype], batch_labels)
             loss = alpha * sv_loss + (1 - alpha) * batch_co_loss
             losses.append(loss.item())
 
@@ -68,11 +69,12 @@ def main():
     parser.add_argument('--num-layers', type=int, default=2, help='层数')
     parser.add_argument('--dropout', type=float, default=0.5, help='Dropout概率')
     parser.add_argument('--tau', type=float, default=0.8, help='温度参数')
-    parser.add_argument('--epochs', type=int, default=150, help='训练epoch数')
-    parser.add_argument('--batch-size', type=int, default=512, help='批大小')
+    parser.add_argument('--epochs', type=int, default=40, help='训练epoch数')
+    parser.add_argument('--batch-size', type=int, default=1024, help='批大小')
     parser.add_argument('--neighbor-size', type=int, default=5, help='邻居采样数量')
     parser.add_argument('--alpha', type=float, default=0.1, help='对比损失占比')
     parser.add_argument('--lr', type=float, default=0.001, help='学习率')
+    parser.add_argument('--eval-every', type=int, default=10, help='每多少个epoch计算一次准确率')
     parser.add_argument('--save-path', help='模型保存路径')
     parser.add_argument('--node_embed_path', default='model/word2vec/ogbn-mag.model', help='预训练顶点嵌入路径')
     args = parser.parse_args()
