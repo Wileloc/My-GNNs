@@ -61,7 +61,7 @@ def evaluate(
     model.eval()
     logits = torch.zeros(g.num_nodes(predict_ntype), num_classes, device=train_idx.device)
     for input_nodes, output_nodes, blocks in loader:
-        logits[output_nodes[predict_ntype]] = model(blocks, blocks[0].srcdata['feat'])[0][predict_ntype]
+        logits[output_nodes[predict_ntype]] = model(blocks, blocks[0].srcdata['feat'])
     return calc_metrics(logits, labels, train_idx, val_idx, test_idx, evaluator)
 
 

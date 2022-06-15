@@ -1,7 +1,7 @@
 import time
 import torch
 import torch.nn as nn
-from dgl.nn.pytorch.conv import GraphConv
+from dgl.nn.pytorch.conv import GraphConv, GATConv
 import dgl
 from gnns.utils.graph_fuse import fuse_graph
 import torch.nn.functional as F
@@ -52,13 +52,18 @@ class BiGraphContrastLayer(nn.Module):
     :fuse_way 图扰动方式
     :tem 温度系数
     '''
-    def __init__(self, in_dim, hidden_dim, predict_type, fuse_way='drop-edge', tem=0.7):
+    def __init__(self, in_dim, hidden_dim, predict_type, num_heads=8, attn_drop=0.0, fuse_way='drop-edge', tem=0.7):
         super().__init__()
         self.predict_type = predict_type
         self.graph_encoder = GraphConv(in_dim, hidden_dim, norm='right', activation=nn.PReLU())
+        # self.gat_encoder = GATConv(in_dim, hidden_dim, num_heads, attn_drop=attn_drop, activation=nn.PReLU())
         self.fuse_way = fuse_way
         self.tem = tem
-        self.neighbor_size = 3
+        self.reset_parameters()
+    
+    def reset_parameters(self):
+        self.gat_encoder.reset_parameters()
+        # self.graph_encoder.reset_parameters()
 
     def _calculate_loss(self, pos_g, pos_feat, neg_g, neg_feat, predict_type_id=None, predict_node_id=None):
         if predict_type_id is not None:
@@ -108,11 +113,16 @@ class BiGraphContrastLayer(nn.Module):
             homo_feat = homo_g.ndata['h']
             homo_g = dgl.add_self_loop(homo_g)
             h = self.graph_encoder(homo_g, homo_feat)
+            # h = self.gat_encoder(homo_g, homo_feat) # （N, H, d_out)
+            # 这里先用了mean的方式进行聚合, 与dgl的GATConv的实现有关
+            # h = torch.mean(h, dim=1)
             # 扰动的图进行GCN
             homo_neg_g = dgl.to_homogeneous(g_neg, ndata=['h'])
             homo_neg_feat = homo_neg_g.ndata['h']
             homo_neg_g = dgl.add_self_loop(homo_neg_g)
             neg_g_h = self.graph_encoder(homo_neg_g, homo_neg_feat)
+            # neg_g_h = self.gat_encoder(homo_neg_g, homo_neg_feat)
+            # neg_g_h = torch.mean(neg_g_h, dim=1)
 
             if len(g.ntypes) == 1:
                 predict_node_id = torch.max(g.edges(etype=g.etypes[0])[1])
@@ -203,9 +213,10 @@ class MyModel(nn.Module):
     :attn_drop Attention Dropout概率
     '''
 
-    def __init__(self, in_dims, hidden_dim, out_dim, etypes, layer, attn_drop=0.5) -> None:
+    def __init__(self, in_dims, hidden_dim, out_dim, etypes, layer, predict_ntype, attn_drop=0.5) -> None:
         super().__init__()
         self.etypes = etypes
+        self.predict_ntype = predict_ntype
         self.fc_in = nn.ModuleDict({
             ntype: nn.Linear(in_dim, hidden_dim) for ntype, in_dim in in_dims.items()
         })
@@ -214,7 +225,18 @@ class MyModel(nn.Module):
         ])
         self.attn = Attention(hidden_dim, attn_drop)
         self.predict = nn.Linear(hidden_dim, out_dim)
+        self.co_loss = None
+        self.reset_parameters()
     
+    def reset_parameters(self):
+        gain = nn.init.calculate_gain('relu')
+        nn.init.xavier_normal_(self.predict.weight, gain)
+        for ntype in self.fc_in:
+            nn.init.xavier_normal_(self.fc_in[ntype].weight, gain)
+
+    def get_co_loss(self):
+        return self.co_loss
+
     def forward(self, blocks, feat):
         '''
         :g DGLGraph 异构图
@@ -229,10 +251,10 @@ class MyModel(nn.Module):
         
         # L层
         for block, layer in zip(blocks, self.contrast):
-            n_feat, co_loss = layer(block, n_feat) # TODO 这里二分图对比的局部损失没有用上
+            n_feat, self.co_loss = layer(block, n_feat) # TODO 这里二分图对比的局部损失没有用上
         # TODO 最后每种关系的节点表征如何结合成统一的节点表示
         # 先用语义层次的attention试一下
         z = {}
         for dtype in n_feat:
             z[dtype] = self.predict(self.attn(torch.stack([n_feat[dtype][etype] for etype in n_feat[dtype]], dim=1)))
-        return z, co_loss
+        return z[self.predict_ntype]

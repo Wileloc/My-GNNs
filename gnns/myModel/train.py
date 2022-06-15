@@ -17,8 +17,10 @@ def train(args):
     data, g, _, labels, predict_ntype, train_idx, val_idx, test_idx, evaluator = \
         load_data(args.dataset, device)
     print("开始添加顶点特征")
-    add_node_feat(g, 'pretrained', args.node_embed_path, True)
-    # add_node_feat(g, 'random')
+    if args.add_feat_method == 'pretrained':
+        add_node_feat(g, 'pretrained', args.node_embed_path, True)
+    else:
+        add_node_feat(g, args.add_feat_method)
 
     sampler = MultiLayerNeighborSampler(list(range(args.neighbor_size, args.neighbor_size + args.num_layers)))
     train_loader = NodeDataLoader(g, {predict_ntype: train_idx}, sampler, device=device, batch_size=args.batch_size)
@@ -26,7 +28,7 @@ def train(args):
 
     model = MyModel(
         {ntype: g.nodes[ntype].data['feat'].shape[1] for ntype in g.ntypes}, 
-        args.num_hidden, data.num_classes, g.canonical_etypes, args.num_layers, args.dropout
+        args.num_hidden, data.num_classes, g.canonical_etypes, args.num_layers, predict_ntype, args.dropout
     ).to(args.device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
@@ -39,9 +41,10 @@ def train(args):
         losses = []
         for input_nodes, output_nodes, blocks in tqdm(train_loader):
             # blocks 表示对每一层的采样，逻辑应该是从这一批次要学习的顶点开始，依次采样倒数第一层，倒数第二层...的节点。
-            batch_logits, batch_co_loss = model(blocks, blocks[0].srcdata['feat'])
+            batch_logits = model(blocks, blocks[0].srcdata['feat'])
+            batch_co_loss = model.get_co_loss()
             batch_labels = labels[output_nodes[predict_ntype]]
-            sv_loss = F.cross_entropy(batch_logits[predict_ntype], batch_labels)
+            sv_loss = F.cross_entropy(batch_logits, batch_labels)
             loss = alpha * sv_loss + (1 - alpha) * batch_co_loss
             losses.append(loss.item())
 
@@ -74,9 +77,10 @@ def main():
     parser.add_argument('--neighbor-size', type=int, default=5, help='邻居采样数量')
     parser.add_argument('--alpha', type=float, default=0.1, help='对比损失占比')
     parser.add_argument('--lr', type=float, default=0.001, help='学习率')
+    parser.add_argument('--add-feat-method', choices=['random', 'pretrained'], default='pretrained', help='顶点特征添加方式')
     parser.add_argument('--eval-every', type=int, default=10, help='每多少个epoch计算一次准确率')
     parser.add_argument('--save-path', help='模型保存路径')
-    parser.add_argument('--node_embed_path', default='model/word2vec/ogbn-mag.model', help='预训练顶点嵌入路径')
+    parser.add_argument('--node-embed-path', default='model/word2vec/ogbn-mag.model', help='预训练顶点嵌入路径')
     args = parser.parse_args()
     print(args)
     train(args)
