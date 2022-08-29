@@ -1,4 +1,6 @@
 __pycache__
 /data
-/model
+/model*
 /output
+
+*.pyc

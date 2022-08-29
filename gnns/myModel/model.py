@@ -1,4 +1,3 @@
-import time
 import torch
 import torch.nn as nn
 from dgl.nn.pytorch.conv import GraphConv, GATConv
@@ -52,14 +51,15 @@ class BiGraphContrastLayer(nn.Module):
     :fuse_way 图扰动方式
     :tem 温度系数
     '''
-    def __init__(self, in_dim, hidden_dim, predict_type, num_heads=8, attn_drop=0.0, fuse_way='drop-edge', tem=0.7):
+    def __init__(self, in_dim, hidden_dim, predict_type, num_heads=8, attn_drop=0.0, fuse_way='drop-edge', tem=0.7, edge_drop_rate=0.01):
         super().__init__()
         self.predict_type = predict_type
-        self.graph_encoder = GraphConv(in_dim, hidden_dim, norm='right', activation=nn.PReLU())
-        # self.gat_encoder = GATConv(in_dim, hidden_dim, num_heads, attn_drop=attn_drop, activation=nn.PReLU())
+        # self.graph_encoder = GraphConv(in_dim, hidden_dim, norm='right', activation=nn.PReLU())
+        self.gat_encoder = GATConv(in_dim, hidden_dim, num_heads, attn_drop=attn_drop, activation=nn.PReLU())
         self.fuse_way = fuse_way
         self.tem = tem
-        self.reset_parameters()
+        self.edge_drop_rate=edge_drop_rate
+        # self.reset_parameters()
     
     def reset_parameters(self):
         self.gat_encoder.reset_parameters()
@@ -93,7 +93,9 @@ class BiGraphContrastLayer(nn.Module):
         # (2N, 1)
         neg_loss = torch.cat(neg_loss, dim=0)
         
-        total_loss = torch.log(torch.sum(torch.exp(torch.cat([pos_loss, neg_loss], dim=0))) - torch.sum(pos_loss))
+        # 如果不考虑负样本，只考虑正样本？
+        total_loss = torch.log(torch.sum(torch.exp(pos_loss/self.tem)))
+        # total_loss = torch.log(torch.sum(torch.exp(torch.cat([pos_loss, neg_loss], dim=0)/self.tem)) - torch.sum(torch.exp(pos_loss/self.tem)))
         return total_loss, h_pos
 
     def forward(self, g):
@@ -106,23 +108,23 @@ class BiGraphContrastLayer(nn.Module):
             # g.srcdata['h'] = feat_src
             # g.dstdata['h'] = feat_dst
             # 扰动
-            g_neg = fuse_graph(g, self.fuse_way)
+            g_neg = fuse_graph(g, self.fuse_way, self.edge_drop_rate)
     
             # 二分图上先进行GCN 同类型的邻居的重要性相同 TODO 可以改为attention
             homo_g = dgl.to_homogeneous(g, ndata=['h'])
             homo_feat = homo_g.ndata['h']
             homo_g = dgl.add_self_loop(homo_g)
-            h = self.graph_encoder(homo_g, homo_feat)
-            # h = self.gat_encoder(homo_g, homo_feat) # （N, H, d_out)
+            # h = self.graph_encoder(homo_g, homo_feat)
+            h = self.gat_encoder(homo_g, homo_feat) # （N, H, d_out)
             # 这里先用了mean的方式进行聚合, 与dgl的GATConv的实现有关
-            # h = torch.mean(h, dim=1)
+            h = torch.mean(h, dim=1)
             # 扰动的图进行GCN
             homo_neg_g = dgl.to_homogeneous(g_neg, ndata=['h'])
             homo_neg_feat = homo_neg_g.ndata['h']
             homo_neg_g = dgl.add_self_loop(homo_neg_g)
-            neg_g_h = self.graph_encoder(homo_neg_g, homo_neg_feat)
-            # neg_g_h = self.gat_encoder(homo_neg_g, homo_neg_feat)
-            # neg_g_h = torch.mean(neg_g_h, dim=1)
+            # neg_g_h = self.graph_encoder(homo_neg_g, homo_neg_feat)
+            neg_g_h = self.gat_encoder(homo_neg_g, homo_neg_feat)
+            neg_g_h = torch.mean(neg_g_h, dim=1)
 
             if len(g.ntypes) == 1:
                 predict_node_id = torch.max(g.edges(etype=g.etypes[0])[1])
@@ -140,14 +142,14 @@ class ContrastLayer(nn.Module):
     hidden_dim: 隐藏层维数
     etypes: 图的关系三元组(src, edge_type, dst)
     '''
-    def __init__(self, in_dim, hidden_dim, etypes, attn_drop=0.5, tem=0.7):
+    def __init__(self, in_dim, hidden_dim, etypes, fuse_way='drop-edge', attn_drop=0.5, tem=0.7, edge_drop_rate=0.01):
         super().__init__()
         self.bigraphs = nn.ModuleDict({
-            etype: BiGraphContrastLayer(in_dim, hidden_dim, dtype, tem=tem) for _, etype, dtype in etypes
+            etype: BiGraphContrastLayer(in_dim, hidden_dim, dtype, tem=tem, fuse_way=fuse_way, edge_drop_rate=edge_drop_rate) for _, etype, dtype in etypes
         })
-        self.attention = nn.ModuleDict({
-            etype: Attention(hidden_dim, attn_drop) for _, etype, _ in etypes
-        })
+        # self.attention = nn.ModuleDict({
+        #     etype: Attention(hidden_dim, attn_drop) for _, etype, _ in etypes
+        # })
         self.rev_etype = {
             e: next(re for rs, re, rd in etypes if rs == d and rd == s and re != e)
             for s, e, d in etypes
@@ -171,7 +173,6 @@ class ContrastLayer(nn.Module):
             # 二分图的输入特征为, dst节点在当前关系下的表征与src节点在当前关系的reverse关系下的表征
             bigraph = dgl.heterograph({(stype, etype, dtype): g.edges(etype=etype)})
             # 选择这条关系包含的节点
-            # TODO 这里还是有问题，应当不需要用到目标顶点的特征，目标顶点的特征是通过消息聚合得到的。输入只有第一层的源顶点特征。
             if stype == dtype:
                 bigraph.nodes[stype].data['h'] = feat[stype][self.rev_etype[etype]][:torch.max(torch.max(g.edges(etype=etype)[0])+1, torch.max(g.edges(etype=etype)[1])+1)]
             else:
@@ -184,7 +185,8 @@ class ContrastLayer(nn.Module):
             local_loss.append(bi_loss) # 目前是直接将所有二分图的loss相加作为局部loss TODO 和节点表示的权重结合
 
         # R-HGNN的做法是对每种关系的节点表示, 为每种关系设置一个注意力向量, 聚合其他关系下的节点表示，传入下一层。
-        cross_feat = {}
+        # cross_feat = {}
+        # 问题 不能这样做聚合 因为每个顶点关联的关系是不一样的 所以不能直接用矩阵
         for dtype in n_feat:
             for etype in n_feat[dtype]:
                 nodes_num = g.num_dst_nodes(dtype)
@@ -192,16 +194,17 @@ class ContrastLayer(nn.Module):
                     n_feat[dtype][etype] = torch.cat([n_feat[dtype][etype], torch.randn((nodes_num-len(n_feat[dtype][etype]),64)).cuda()])
                 elif len(n_feat[dtype][etype]) > nodes_num:
                     n_feat[dtype][etype] = n_feat[dtype][etype][:nodes_num]
-        for dtype in n_feat:
-            cross_feat[dtype] = {}
-            if len(n_feat[dtype]) == 1:
-                cross_feat[dtype] = n_feat[dtype]
-                continue
-            for etype in n_feat[dtype]:
-                h = torch.stack([n_feat[dtype][e] for e in n_feat[dtype] if e != etype], dim=1)
-                z = self.attention[etype](h) #(N, d)
-                cross_feat[dtype][etype] = z
-        return cross_feat, torch.sum(torch.stack(local_loss))
+        # for dtype in n_feat:
+        #     cross_feat[dtype] = {}
+        #     if len(n_feat[dtype]) == 1:
+        #         cross_feat[dtype] = n_feat[dtype]
+        #         continue
+        #     for etype in n_feat[dtype]:
+        #         h = torch.stack([n_feat[dtype][e] for e in n_feat[dtype]], dim=1)
+        #         z = self.attention[etype](h) #(N, d)
+        #         cross_feat[dtype][etype] = z
+        # return cross_feat, torch.sum(torch.stack(local_loss))
+        return n_feat, torch.sum(torch.stack(local_loss))
 
 
 class MyModel(nn.Module):
@@ -213,7 +216,7 @@ class MyModel(nn.Module):
     :attn_drop Attention Dropout概率
     '''
 
-    def __init__(self, in_dims, hidden_dim, out_dim, etypes, layer, predict_ntype, attn_drop=0.5) -> None:
+    def __init__(self, in_dims, hidden_dim, out_dim, etypes, layer, predict_ntype, fuse_way='drop-edge', attn_drop=0.5, tem=0.7, edge_drop_rate=0.01) -> None:
         super().__init__()
         self.etypes = etypes
         self.predict_ntype = predict_ntype
@@ -221,12 +224,15 @@ class MyModel(nn.Module):
             ntype: nn.Linear(in_dim, hidden_dim) for ntype, in_dim in in_dims.items()
         })
         self.contrast = nn.ModuleList(
-            [ContrastLayer(hidden_dim, hidden_dim, etypes) for _ in range(layer)
+            [ContrastLayer(hidden_dim, hidden_dim, etypes, fuse_way=fuse_way, tem=tem, edge_drop_rate=edge_drop_rate) for _ in range(layer)
         ])
+        self.attention = nn.ModuleDict({
+            etype: Attention(hidden_dim, attn_drop) for _, etype, _ in etypes
+        })
         self.attn = Attention(hidden_dim, attn_drop)
         self.predict = nn.Linear(hidden_dim, out_dim)
         self.co_loss = None
-        self.reset_parameters()
+        # self.reset_parameters()
     
     def reset_parameters(self):
         gain = nn.init.calculate_gain('relu')
@@ -252,9 +258,19 @@ class MyModel(nn.Module):
         # L层
         for block, layer in zip(blocks, self.contrast):
             n_feat, self.co_loss = layer(block, n_feat) # TODO 这里二分图对比的局部损失没有用上
+        cross_feat = {}
+        for dtype in n_feat:
+            cross_feat[dtype] = {}
+            if len(n_feat[dtype]) == 1:
+                cross_feat[dtype] = n_feat[dtype]
+                continue
+            for etype in n_feat[dtype]:
+                h = torch.stack([n_feat[dtype][e] for e in n_feat[dtype]], dim=1)
+                z = self.attention[etype](h) #(N, d)
+                cross_feat[dtype][etype] = z
         # TODO 最后每种关系的节点表征如何结合成统一的节点表示
         # 先用语义层次的attention试一下
         z = {}
         for dtype in n_feat:
-            z[dtype] = self.predict(self.attn(torch.stack([n_feat[dtype][etype] for etype in n_feat[dtype]], dim=1)))
+            z[dtype] = self.predict(self.attn(torch.stack([cross_feat[dtype][etype] for etype in cross_feat[dtype]], dim=1)))
         return z[self.predict_ntype]
