@@ -6,8 +6,8 @@ import torch.nn.functional as F
 import torch.optim as optim
 from tqdm import tqdm
 from dgl.dataloading import MultiLayerNeighborSampler, NodeDataLoader
-from gnns.myModel.model import MyModel
-from gnns.utils import (METRICS_STR, add_node_feat, evaluate, get_device,
+from gnns.myModel.model_metapaths import MyModel
+from gnns.utils import (METRICS_STR, add_node_feat, calc_metrics, get_device,
                         load_data, set_random_seed, hg_preprocess)
 
 
@@ -23,7 +23,13 @@ def train(args):
     else:
         add_node_feat(g, args.add_feat_method)
     
-    g = hg_preprocess(g, predict_ntype, args.num_layers+1)
+    feat_g = hg_preprocess(g.to(torch.device('cpu')), predict_ntype, args.num_layers+1)
+
+    feats = {}
+    keys = list(feat_g.nodes[predict_ntype].data.keys())
+    for k in keys:
+        feats[k] = feat_g.nodes[predict_ntype].data.pop(k)
+        feats[k] = feats[k].to(device)
 
     sampler = MultiLayerNeighborSampler(list(range(args.neighbor_size, args.neighbor_size + args.num_layers)))
     train_loader = NodeDataLoader(g, {predict_ntype: train_idx}, sampler, device=device, batch_size=args.batch_size)
@@ -31,7 +37,7 @@ def train(args):
 
     model = MyModel(
         {ntype: g.nodes[ntype].data['feat'].shape[1] for ntype in g.ntypes}, 
-        args.num_hidden, data.num_classes, g.canonical_etypes, args.num_layers, predict_ntype, attn_drop=args.dropout
+        args.num_hidden, data.num_classes, args.pre_layers, predict_ntype, attn_drop=args.dropout
     ).to(args.device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
@@ -43,7 +49,8 @@ def train(args):
         losses = []
         for input_nodes, output_nodes, blocks in tqdm(train_loader):
             # blocks 表示对每一层的采样，逻辑应该是从这一批次要学习的顶点开始，依次采样倒数第一层，倒数第二层...的节点。
-            batch_logits = model(blocks, blocks[0].srcdata['feat'])
+            batch_feats = {k: x[output_nodes[predict_ntype]] for k, x in feats.items()}
+            batch_logits = model(batch_feats)
             batch_labels = labels[output_nodes[predict_ntype]]
             loss = F.cross_entropy(batch_logits, batch_labels)
             losses.append(loss.item())
@@ -55,12 +62,38 @@ def train(args):
         print('Epoch {:d} | Loss {:.4f}'.format(epoch, sum(losses) / len(losses)))
         if epoch % args.eval_every == 0 or epoch == args.epochs - 1:
             print(METRICS_STR.format(*evaluate(
-                model, loader, g, labels, data.num_classes, predict_ntype,
+                model, loader, feats, g, labels, data.num_classes, predict_ntype,
                 train_idx, val_idx, test_idx, evaluator
             )))
     if args.save_path:
         torch.save(model.cpu().state_dict(), args.save_path)
         print('模型已保存到', args.save_path)
+
+
+@torch.no_grad()
+def evaluate(
+        model, loader, feats, g, labels, num_classes, predict_ntype,
+        train_idx, val_idx, test_idx, evaluator=None):
+    """评估模型性能
+
+    :param model: nn.Module GNN模型
+    :param loader: NodeDataLoader 图数据加载器
+    :param g: DGLGraph 图
+    :param labels: tensor(N) 顶点标签
+    :param num_classes: int 类别数
+    :param predict_ntype: str 目标顶点类型
+    :param train_idx: tensor(N_train) 训练集顶点id
+    :param val_idx: tensor(N_val) 验证集顶点id
+    :param test_idx: tensor(N_test) 测试集顶点id
+    :param evaluator: ogb.nodeproppred.Evaluator
+    :return: train_acc, val_acc, test_acc, train_f1, val_f1, test_f1
+    """
+    model.eval()
+    logits = torch.zeros(g.num_nodes(predict_ntype), num_classes, device=train_idx.device)
+    for input_nodes, output_nodes, blocks in loader:
+        batch_feats = {k: x[output_nodes[predict_ntype]] for k, x in feats.items()}
+        logits[output_nodes[predict_ntype]] = model(batch_feats)
+    return calc_metrics(logits, labels, train_idx, val_idx, test_idx, evaluator)
 
 
 def main():
@@ -70,6 +103,7 @@ def main():
     parser.add_argument('--dataset', choices=['ogbn-mag', 'oag-venue', 'oag-field'], default='ogbn-mag', help='数据集')
     parser.add_argument('--num-hidden', type=int, default=64, help='The hidden dim')
     parser.add_argument('--num-layers', type=int, default=2, help='层数')
+    parser.add_argument('--pre-layers', type=int, default=2, help='MLP层数')
     parser.add_argument('--dropout', type=float, default=0.5, help='Dropout概率')
     parser.add_argument('--epochs', type=int, default=40, help='训练epoch数')
     parser.add_argument('--batch-size', type=int, default=2048, help='批大小')

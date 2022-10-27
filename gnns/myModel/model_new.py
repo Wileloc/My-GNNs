@@ -1,11 +1,7 @@
 import torch
 import torch.nn as nn
-import dgl.function as fn
-from dgl.nn.pytorch.conv import GraphConv, GATConv
+from dgl.nn.pytorch.conv import GraphConv
 import dgl
-from gnns.utils.graph_fuse import fuse_graph
-import torch.nn.functional as F
-from dgl.utils import expand_as_pair
 
 
 class Attention(nn.Module):
@@ -50,55 +46,36 @@ class BiGraphContrastLayer(nn.Module):
     :in_dim 输入特征维数
     :hidden_dim 图编码器特征输出维数 即隐藏层维数
     :predict_type 对比学习的顶点类型 边的目标顶点
-    :fuse_way 图扰动方式
-    :tem 温度系数
     '''
-    def __init__(self, in_dim, hidden_dim, predict_type, num_heads=8, attn_drop=0.0, fuse_way='drop-edge', tem=0.7, edge_drop_rate=0.01):
+    def __init__(self, in_dim, hidden_dim, predict_type, norm='right', activation=nn.PReLU()):
         super().__init__()
         self.predict_type = predict_type
-        self.fuse_way = fuse_way
-        self.tem = tem
-        self.edge_drop_rate=edge_drop_rate
+        # TODO norm方式之前是right 试一下both和left
+        self.graph_encoder = GraphConv(in_dim, hidden_dim, norm=norm, activation=activation)
+    
+    def reset_parameters(self):
+        gain = nn.init.calculate_gain('relu')
+        nn.init.xavier_normal_(self.graph_encoder.weight, gain)
+        nn.init.xavier_normal_(self.graph_encoder.bias, gain)
 
-    def _calculate_loss(self, pos_g, neg_g):
-        h_pos = pos_g.dstdata['ft']
-        h_neg = neg_g.dstdata['ft']
-
-        pos_loss = F.cosine_similarity(h_pos, h_neg)
-
-        # pos_nei_feat = pos_g.srcdata['ft'][pos_g.edges(etype=pos_g.etypes[0])[0]]
-        # neg_nei_feat = neg_g.srcdata['ft'][neg_g.edges(etype=neg_g.etypes[0])[0]]
-        # neg_ebd_feat = neg_g.srcdata['ft'][pos_g.edges(etype=pos_g.etypes[0])[1]]
-        # pos_ebd_feat = pos_g.srcdata['ft'][neg_g.edges(etype=neg_g.etypes[0])[1]]
-        # neg_loss = []
-        # # 另一视图的邻居节点为负样本
-        # neg_loss.append(F.cosine_similarity(pos_nei_feat, neg_ebd_feat))
-        # neg_loss.append(F.cosine_similarity(neg_nei_feat, pos_ebd_feat))
-        # # (2N, 1)
-        # neg_loss = torch.cat(neg_loss, dim=0)
-
-        # torch.log(torch.sum(torch.exp(torch.cat([pos_loss, neg_loss], dim=0)/self.tem)) - torch.sum(torch.exp(pos_loss/self.tem)))
-
-        return torch.log(torch.sum(torch.exp(pos_loss/self.tem)))
-
-    def forward(self, g, feats):
+    def forward(self, g):
         '''
         :g 二分图
-        :feats (tensor(N_src, d_in), tensor(N_dst, d_in)) 输入特征
+        :feat (tensor(N_src, d_in), tensor(N_dst, d_in)) 输入特征
         '''
         with g.local_scope():
-            feat_src, feat_dst = expand_as_pair(feats, g)
-            g.srcdata['ft'] = feat_src
+            homo_g = dgl.to_homogeneous(g, ndata=['h'])
+            homo_feat = homo_g.ndata['h']
+            homo_g = dgl.add_self_loop(homo_g)
+            h = self.graph_encoder(homo_g, homo_feat)
 
-            # 扰动
-            g_neg = fuse_graph(g, self.fuse_way, self.edge_drop_rate)
-
-            # GCN聚合
-            g.update_all(fn.copy_u('ft', 'm'), fn.sum('m', 'ft'))
-            g_neg.update_all(fn.copy_u('ft', 'm'), fn.sum('m', 'ft'))
-            loss = self._calculate_loss(g, g_neg)
-            return g.dstdata['ft'], loss
-            # TODO GAT聚合
+            if len(g.ntypes) == 1:
+                predict_node_id = torch.max(g.edges(etype=g.etypes[0])[1])
+                pos_nodes = homo_g.filter_nodes(lambda nodes: (nodes.data['_ID'] <= predict_node_id))
+            else:
+                predict_type_id = g.ntypes.index(self.predict_type)
+                pos_nodes = homo_g.filter_nodes(lambda nodes: (nodes.data['_TYPE'] == predict_type_id))
+            return h[pos_nodes]
 
 
 class ContrastLayer(nn.Module):
@@ -108,38 +85,74 @@ class ContrastLayer(nn.Module):
     hidden_dim: 隐藏层维数
     etypes: 图的关系三元组(src, edge_type, dst)
     '''
-    def __init__(self, in_dim, hidden_dim, etypes, fuse_way='drop-edge', attn_drop=0.5, tem=0.7, edge_drop_rate=0.01):
+    def __init__(self, in_dim, hidden_dim, etypes, attn_drop=0.5):
         super().__init__()
         self.bigraphs = nn.ModuleDict({
-            etype: BiGraphContrastLayer(in_dim, hidden_dim, dtype, tem=tem, fuse_way=fuse_way, edge_drop_rate=edge_drop_rate) for _, etype, dtype in etypes
+            etype: BiGraphContrastLayer(in_dim, hidden_dim, dtype) for _, etype, dtype in etypes
         })
-        self.rev_etype = {
-            e: next(re for rs, re, rd in etypes if rs == d and rd == s and re != e)
-            for s, e, d in etypes
-        }
+        self.transformer = nn.ModuleDict({
+            etype: nn.TransformerDecoderLayer(d_model=hidden_dim, nhead=8, batch_first=True, dropout=attn_drop) for _, etype, _ in etypes
+        })
+        # self.rev_etype = {
+        #     e: next(re for rs, re, rd in etypes if rs == d and rd == s and re != e)
+        #     for s, e, d in etypes
+        # }
+        # self.activation = nn.ReLU()
     
-    def forward(self, g, feats):
+    def forward(self, g, feat):
         '''
         :g 异构图
-        :feat 节点特征Dict 每种类型的顶点在不同关系下(dst作为目标节点)的表示{(stype, etype, dtype): Tensor(N, d)}
-        return: 二分图对比学习 + 跨关系学习后的节点表征Dict {(stype, etype, dtype): Tensor(N, d)}, 二分图对比学习的loss
+        :feat 节点特征Dict 每种类型的顶点在不同关系下(dst作为目标节点)的表示{ntype: {etype: Tensor(N, d)}}
+        return: 二分图对比学习 + 跨关系学习后的节点表征Dict {ntype: {etype: Tensor(N, d)}}, 二分图对比学习的loss
         '''
-
-        if g.is_block:
-            feats_dst = {r: feats[r][:g.num_dst_nodes(r[2])] for r in feats}
-        else:
-            feats_dst = feats
-
         n_feat = {}
-        local_loss = []
+        dtype_feat = {}
+        for dtype in feat:
+            for etype in feat[dtype]:
+                if dtype not in dtype_feat:
+                    dtype_feat[dtype] = torch.zeros_like(feat[dtype][etype])
+                dtype_feat[dtype] = torch.add(dtype_feat[dtype], feat[dtype][etype])
         for stype, etype, dtype in g.canonical_etypes:
-            if g.num_edges((stype, etype, dtype)) > 0:
-                n_feat[(stype, etype, dtype)], bi_loss = self.bigraphs[etype](
-                    g[stype, etype, dtype], 
-                    (feats[(dtype, self.rev_etype[etype], stype)], feats_dst[(stype, etype, dtype)])
-                )
-                local_loss.append(bi_loss)# 目前是直接将所有二分图的loss相加作为局部loss TODO 和节点表示的权重结合
-        return n_feat, torch.sum(torch.stack(local_loss))
+            if g.num_edges(etype) == 0:
+                continue
+            if dtype not in n_feat:
+                n_feat[dtype] = {}
+            # 构造二分图 每种边的关系对应一种二分图 {etype: BiGraph}
+            # 二分图的输入特征为, dst节点在当前关系下的表征与src节点在当前关系的reverse关系下的表征
+            bigraph = dgl.heterograph({(stype, etype, dtype): g.edges(etype=etype)})
+            # 选择这条关系包含的节点 TODO src节点的特征选择的依据？为什么只选择rev_etype 会不会导致重复学习自己的特征 因为rev_etype在L-1层的来源是dtype类型的节点
+            if stype == dtype:
+                bigraph.nodes[stype].data['h'] = dtype_feat[stype][:torch.max(torch.max(g.edges(etype=etype)[0])+1, torch.max(g.edges(etype=etype)[1])+1)]
+            else:
+                bigraph.nodes[stype].data['h'] = dtype_feat[stype][:torch.max(g.edges(etype=etype)[0])+1]
+                bigraph.nodes[dtype].data['h'] = feat[dtype][etype][:torch.max(g.edges(etype=etype)[1])+1]
+            # 二分图目标节点的表示
+            n_feat[dtype][etype] = self.bigraphs[etype](bigraph) # 同目标类型的节点的局部embedding, 同时记录边关系类型, 用于跨关系消息传递
+
+        cross_feat = {}
+        for dtype in n_feat:
+            cross_feat[dtype] = {}
+            for etype in n_feat[dtype]:
+                nodes_id = torch.max(g.edges(etype=etype)[1])+1
+                cross_feat[dtype][etype] = feat[dtype][etype][:g.num_dst_nodes(dtype)]
+                cross_feat[dtype][etype][:nodes_id] = n_feat[dtype][etype]
+
+        d_h = {
+            dtype: [cross_feat[dtype][e] for e in cross_feat[dtype]] for dtype in cross_feat
+        }
+
+        for dtype in cross_feat:
+            if len(cross_feat[dtype]) == 1:
+                continue
+            for etype in cross_feat[dtype]:
+                h = torch.stack(d_h[dtype], dim=1) # (N, M, d)
+                # z = self.attention[etype](h) #(N, d)
+                # TODO 如果前面src节点特征改了的话这里也要改
+                tgt = torch.unsqueeze(feat[dtype][etype][:g.num_dst_nodes(dtype)], dim=1)
+                # cross_feat[dtype][etype] = feat[dtype][etype][:g.num_dst_nodes(dtype)] + z
+                cross_feat[dtype][etype] = torch.squeeze(self.transformer[etype](tgt, h), dim=1)
+
+        return cross_feat
 
 
 class MyModel(nn.Module):
@@ -151,32 +164,37 @@ class MyModel(nn.Module):
     :attn_drop Attention Dropout概率
     '''
 
-    def __init__(self, in_dims, hidden_dim, out_dim, etypes, layer, predict_ntype, fuse_way='drop-edge', attn_drop=0.5, tem=0.7, edge_drop_rate=0.01) -> None:
+    def __init__(self, in_dims, hidden_dim, out_dim, etypes, layer, predict_ntype, attn_drop=0.5) -> None:
         super().__init__()
         self.etypes = etypes
         self.predict_ntype = predict_ntype
         self.fc_in = nn.ModuleDict({
             ntype: nn.Linear(in_dim, hidden_dim) for ntype, in_dim in in_dims.items()
         })
-        self.contrast = nn.ModuleList(
-            [ContrastLayer(hidden_dim, hidden_dim, etypes, fuse_way=fuse_way, tem=tem, edge_drop_rate=edge_drop_rate) for _ in range(layer)
-        ])
-        self.attention = nn.ModuleDict({
-            etype: Attention(hidden_dim, attn_drop) for _, etype, _ in etypes
+        self.in_weights = nn.ParameterDict({
+            etype[1]: nn.Parameter(torch.FloatTensor(hidden_dim, hidden_dim)) for etype in etypes
         })
-        self.attn = Attention(hidden_dim, attn_drop)
-        self.predict = nn.Linear(hidden_dim, out_dim)
-        self.co_loss = None
-        # self.reset_parameters()
-    
+        self.contrast = nn.ModuleList(
+            [ContrastLayer(hidden_dim, hidden_dim, etypes, attn_drop=attn_drop) for _ in range(layer)
+        ])
+        # self.attn = Attention(hidden_dim, attn_drop)
+        predict_etype_number = sum([e[2] == self.predict_ntype for e in etypes])
+        # self.fc_last = nn.Linear(in_dims[self.predict_ntype], hidden_dim)
+        # self.hop_attn = nn.ModuleDict({
+        #     e[1]: Attention(hidden_dim, attn_drop) for e in etypes if e[2] == self.predict_ntype
+        # })
+        self.predict = nn.Linear(hidden_dim * predict_etype_number, out_dim)
+        # self.predict = nn.Linear(hidden_dim * predict_etype_number * layer, out_dim)
+        self.reset_parameters()
+
     def reset_parameters(self):
         gain = nn.init.calculate_gain('relu')
         nn.init.xavier_normal_(self.predict.weight, gain)
+        # nn.init.xavier_normal_(self.fc_last.weight, gain)
         for ntype in self.fc_in:
             nn.init.xavier_normal_(self.fc_in[ntype].weight, gain)
-
-    def get_co_loss(self):
-        return self.co_loss
+        for etype in self.in_weights:
+            nn.init.xavier_normal_(self.in_weights[etype], gain)
 
     def forward(self, blocks, feat):
         '''
@@ -184,22 +202,38 @@ class MyModel(nn.Module):
         :feat 节点特征Dict {ntype: Tensor(N, d_i)}
         return 节点表征Dict {ntype: Tensor(N, d_h)}
         '''
-        n_feat = {
-            (stype, etype, dtype): self.fc_in[dtype](feat[dtype])
-            for stype, etype, dtype in self.etypes
-        }
-        
-        # L层
-        for block, layer in zip(blocks, self.contrast):
-            n_feat, self.co_loss = layer(block, n_feat) # TODO 这里二分图对比的局部损失没有用上
+        n_feat = {}
+        for _, etype, dtype in self.etypes:
+            if dtype not in n_feat:
+                n_feat[dtype] = {}
+            n_feat[dtype][etype] = torch.mm(self.fc_in[dtype](feat[dtype]), self.in_weights[etype])
+            # n_feat[dtype][etype] = self.fc_in[dtype](feat[dtype])
 
-        cross_feat = {
-            (e, d): self.attention[e](torch.stack([n_feat[(s, e, d)]], dim=1)) for s, e, d in n_feat
-        }
+        for block, layer in zip(blocks, self.contrast):
+            n_feat= layer(block, n_feat)
 
         # TODO 最后每种关系的节点表征如何结合成统一的节点表示
         # 先用语义层次的attention试一下
-        z = {
-            d: self.predict(self.attn(torch.stack([cross_feat[(e, d)]], dim=1))) for e, d in cross_feat
-        }
-        return z[self.predict_ntype]
+        # h = torch.stack([n_feat[self.predict_ntype][etype] for etype in n_feat[self.predict_ntype]], dim=1)
+        # z = self.predict(self.attn(h))
+        h = [n_feat[self.predict_ntype][etype] for etype in n_feat[self.predict_ntype]]
+        # h.append(self.fc_last(blocks[-1].dstdata['feat'][self.predict_ntype]))
+        z = self.predict(torch.cat(h, dim=1))
+        return z
+
+        # hops_feat = []
+        # for l in range(1, len(self.contrast)+1):
+        #     neighbor_feat = {}
+        #     for _, etype, dtype in self.etypes:
+        #         if dtype not in neighbor_feat:
+        #             neighbor_feat[dtype] = {}
+        #         neighbor_feat[dtype][etype] = self.fc_in[dtype](feat[dtype])
+        #     for block, layer in zip(blocks[-l:], self.contrast[-l:]):
+        #         neighbor_feat = layer(block, neighbor_feat)
+        #     hops_feat.append(neighbor_feat[self.predict_ntype])
+        
+        # hops_feat = [self.hop_attn[e](torch.stack([h[e] for h in hops_feat], dim=1)) for e in hops_feat[0]]
+        # hops_feat.append(self.fc_last(blocks[-1].dstdata['feat'][self.predict_ntype]))
+        # h = torch.cat(hops_feat, dim=1)
+        # z = self.predict(h)
+        # return z

@@ -1,11 +1,12 @@
 import dgl
 import dgl.function as fn
 import torch
+import gc
 from gensim.models import Word2Vec
 from ogb.nodeproppred import DglNodePropPredDataset, Evaluator
 
 from gnns.config import DATA_DIR
-# from gnns.data import ACMDataset
+from gnns.data import ACMDataset, DBLPDataset
 # from gnnrec.kgrec.data import OAGVenueDataset, OAGFieldDataset
 
 
@@ -20,10 +21,10 @@ def load_data(name, device='cpu', add_reverse_edge=True, reverse_self=True):
     """
     if name == 'ogbn-mag':
         return load_ogbn_mag(device, add_reverse_edge, reverse_self)
-    # elif name == 'acm':
-        # data = ACMDataset()
-    # elif name == 'dblp':
-    #     data = DBLPDataset()
+    elif name == 'acm':
+        data = ACMDataset()
+    elif name == 'dblp':
+        data = DBLPDataset()
     # elif name == 'oag-venue':
     #     data = OAGVenueDataset()
     # elif name == 'oag-field':
@@ -154,3 +155,34 @@ def add_node_feat(g, method, node_embed_path=None, concat=False, use_raw_id=Fals
         rand_node_feat(g)
     else:
         raise ValueError(f'add_node_feat: 未知方法{method}')
+
+
+def hg_preprocess(g, predict_ntype, max_hops):
+    data = {}
+    for stype, etype, dtype in g.canonical_etypes:
+        u, v = g.edges(etype=(stype, etype, dtype))
+        data[(stype, etype, dtype)] = u, v
+    new_g = dgl.heterograph(data, {ntype: g.num_nodes(ntype) for ntype in g.ntypes})
+    for ntype in g.ntypes:
+        new_g.nodes[ntype].data[ntype] = g.nodes[ntype].data['feat']
+    for etype in g.canonical_etypes:
+        new_g.edges[etype].data.update(g.edges[etype].data)
+    for hop in range(1, max_hops):
+        for stype, etype, dtype in new_g.canonical_etypes:
+            for k in list(new_g.nodes[stype].data.keys()):
+                if len(k.split('-')) == hop:
+                    current_dst_name = f'{dtype}-{k}'
+                    if hop == max_hops-1 and dtype != predict_ntype: continue
+                    new_g[etype].update_all(fn.copy_u(k, 'm'), fn.mean('m', current_dst_name), etype=etype)
+        
+        for ntype in new_g.ntypes:
+            if ntype == predict_ntype: continue
+            removes = []
+            for k in new_g.nodes[ntype].data.keys():
+                if len(k.split('-')) <= hop:
+                    removes.append(k)
+            for k in removes:
+                new_g.nodes[ntype].data.pop(k)
+        gc.collect()
+    
+    return new_g
