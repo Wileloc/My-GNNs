@@ -6,7 +6,8 @@ from gensim.models import Word2Vec
 from ogb.nodeproppred import DglNodePropPredDataset, Evaluator
 
 from gnns.config import DATA_DIR
-from gnns.data import ACMDataset, DBLPDataset
+from gnns.data import DBLPDataset, ACMDataset
+# from gnns.data.acm import ACMDataset
 # from gnnrec.kgrec.data import OAGVenueDataset, OAGFieldDataset
 
 

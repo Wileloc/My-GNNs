@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class Attention(nn.Module):
@@ -44,30 +45,28 @@ class MyModel(nn.Module):
     :attn_drop Attention Dropout概率
     '''
 
-    def __init__(self, in_dims, hidden_dim, out_dim, layer, predict_ntype, ntype_nums, attn_drop=0.5) -> None:
+    def __init__(self, in_dims, hidden_dim, out_dim, layer, predict_ntype, attn_drop=0.5) -> None:
         super().__init__()
         self.predict_ntype = predict_ntype
         self.fc_in = nn.ModuleDict({
-            ntype: nn.Linear(in_dim, hidden_dim) for ntype, in_dim in in_dims.items()
+            path: nn.Linear(in_dim, hidden_dim) for path, in_dim in in_dims.items()
         })
-        self.in_dropout = nn.Dropout(attn_drop)
+        # self.in_dropout = nn.Dropout(attn_drop)
         self.res_fc = nn.Linear(in_dims[predict_ntype], hidden_dim)
         self.transformer = nn.TransformerDecoderLayer(d_model=hidden_dim, nhead=8, batch_first=True, dropout=attn_drop)
-        self.ntype_projection = nn.ModuleDict({
-            ntype: nn.Linear(hidden_dim * num, hidden_dim) for ntype, num in ntype_nums.items()
-        })
         # self.attention = nn.ModuleDict({
         #     ntype: Attention(hidden_dim, attn_drop) for ntype in in_dims
         # })
         # self.node_attention = Attention(hidden_dim, attn_drop)
-        length = hidden_dim * (len(in_dims) + 1)
+        length = hidden_dim * len(in_dims)
         # length = hidden_dim
+        self.cat_projection = nn.Sequential(nn.Linear(length, hidden_dim), nn.PReLU(), nn.Dropout(attn_drop))
         predict_layer = [
-            [nn.Linear(length, length), nn.PReLU(), nn.Dropout(attn_drop)] 
+            [nn.Linear(hidden_dim, hidden_dim), nn.PReLU(), nn.Dropout(attn_drop)] 
             for _ in range(layer)
         ]
         self.predict = nn.Sequential(*(
-            [ele for lr in predict_layer for ele in lr] + [nn.Linear(length, out_dim)]
+            [ele for lr in predict_layer for ele in lr] + [nn.Linear(hidden_dim, out_dim)]
         ))
         # self.reset_parameters()
 
@@ -91,33 +90,17 @@ class MyModel(nn.Module):
         '''
         tgt_feat = feat[self.predict_ntype]
         feat = {
-            path: self.fc_in[path.split('-')[-1]](self.in_dropout(feat[path])) for path in feat
+            path: self.fc_in[path](feat[path]) for path in feat
         }
 
-        # x = torch.stack(list(feat.values()), dim=1)
-        ntype_x = {}
-        for path in feat:
-            ntype = path.split('-')[-1]
-            if ntype not in ntype_x:
-                ntype_x[ntype] = []
-            ntype_x[ntype].append(feat[path])
-        # ntype_x = {
-        #     ntype: torch.stack(ntype_x[ntype], dim=1) for ntype in ntype_x if len(ntype_x[ntype]) != 0
-        # }
-        ntype_x = {
-            ntype: self.ntype_projection[ntype](torch.cat(ntype_x[ntype], dim=1)) for ntype in ntype_x if len(ntype_x[ntype]) != 0
-        }
-        # ntype_x = {
-        #     ntype: self.transformer(ntype_x[ntype], x) for ntype in ntype_x
-        # }
-        z = list(ntype_x.values())
-        z.append(self.res_fc(tgt_feat))
-        x = torch.stack(z, dim=1)
+        x = torch.stack(list(feat.values()), dim=1)
+        # print([torch.linalg.matrix_rank(feat[path]).item() for path in feat])
         x = self.transformer(x, x)
         x = torch.reshape(x, (x.size()[0], -1))
+        # print([torch.linalg.matrix_rank(x[:, 64*i:64*(i+1)]).item() for i in range(9)])
         # z = [self.attention[ntype](ntype_x[ntype]) for ntype in ntype_x]
 
-        # z.append(self.res_fc(tgt_feat))
+        x = self.cat_projection(x) + self.res_fc(tgt_feat)
         x = self.predict(x)
         # TODO dblp效果很好 预测顶点时author，但acm等paper分类任务上不好
         # z = self.node_attention(torch.stack(z, dim=1))
