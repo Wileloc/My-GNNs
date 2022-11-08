@@ -15,11 +15,11 @@ class BiGraphContrastLayer(nn.Module):
     :hidden_dim 图编码器特征输出维数 即隐藏层维数
     :predict_type 对比学习的顶点类型 边的目标顶点
     '''
-    def __init__(self, in_dim, hidden_dim, predict_type):
+    def __init__(self, in_dim, hidden_dim, predict_type, attn_drop=0.5):
         super().__init__()
         self.predict_type = predict_type
         num_heads = 8
-        self.graph_encoder = GATConv(in_dim, hidden_dim // num_heads, num_heads, attn_drop=0.5)
+        self.graph_encoder = GATConv(in_dim, hidden_dim // num_heads, num_heads, attn_drop=attn_drop)
     
     def forward(self, g):
         '''
@@ -31,7 +31,7 @@ class BiGraphContrastLayer(nn.Module):
             homo_feat = homo_g.ndata['h']
             homo_g = dgl.add_self_loop(homo_g)
             h = self.graph_encoder(homo_g, homo_feat)
-            h = h.reshape(h.size()[0], -1)
+            h = h.flatten(start_dim=1)
 
             predict_type_id = g.ntypes.index(self.predict_type)
             pos_nodes = homo_g.filter_nodes(lambda nodes: (nodes.data['_TYPE'] == predict_type_id))
@@ -45,10 +45,10 @@ class ContrastLayer(nn.Module):
     hidden_dim: 隐藏层维数
     etypes: 图的关系三元组(src, edge_type, dst)
     '''
-    def __init__(self, in_dim, hidden_dim, etypes):
+    def __init__(self, in_dim, hidden_dim, etypes, attn_drop):
         super().__init__()
         self.bigraphs = nn.ModuleDict({
-            etype: BiGraphContrastLayer(in_dim, hidden_dim, dtype) for _, etype, dtype in etypes
+            etype: BiGraphContrastLayer(in_dim, hidden_dim, dtype, attn_drop) for _, etype, dtype in etypes
         })
     
     def forward(self, g, feat):
@@ -63,7 +63,7 @@ class ContrastLayer(nn.Module):
             if g.num_edges(etype) == 0:
                 continue
             if dtype not in n_feat:
-                n_feat[dtype] = {dtype: feat[dtype][dtype]}
+                n_feat[dtype] = {dtype: feat[dtype][dtype][:g.num_dst_nodes(dtype)]}
             if stype == dtype:
                 num_nodes_dict = {stype: g.num_src_nodes(stype)}
             else:
@@ -100,11 +100,11 @@ class MyModel(nn.Module):
             ntype: nn.Linear(in_dim, hidden_dim) for ntype, in_dim in in_dims.items()
         })
         self.contrast = nn.ModuleList(
-            [ContrastLayer(hidden_dim, hidden_dim, etypes) for _ in range(layer)
+            [ContrastLayer(hidden_dim, hidden_dim, etypes, attn_drop) for _ in range(layer)
         ])
         self.transformer = nn.TransformerDecoderLayer(d_model=hidden_dim, nhead=8, batch_first=True, dropout=attn_drop)
         self.predict = nn.Linear(hidden_dim * metapath_numbers, out_dim)
-        # self.reset_parameters()
+        self.reset_parameters()
 
     def reset_parameters(self):
         gain = nn.init.calculate_gain('relu')
@@ -122,12 +122,19 @@ class MyModel(nn.Module):
             dtype: {dtype: self.fc_in[dtype](feat[dtype])} for dtype in feat
         }
 
-        h = {
-            self.predict_ntype: n_feat[self.predict_ntype][self.predict_ntype]
-        }
         predict_nodes_num = blocks[-1].num_dst_nodes(self.predict_ntype)
+        h = {
+            self.predict_ntype: n_feat[self.predict_ntype][self.predict_ntype][:predict_nodes_num]
+        }
         for idx, (block, layer) in enumerate(zip(blocks, self.contrast)):
             n_feat = layer(block, n_feat)
+            for dtype in n_feat:
+                remove = []
+                for path in n_feat[dtype]:
+                    if len(path.split('-')) - 2 < idx and len(path.split('-')) - 2 >= 0:
+                        remove.append(path)
+                for path in remove:
+                    n_feat[dtype].pop(path)
             for path in n_feat[self.predict_ntype]:
                 if len(path.split('-')) - 2 == idx:
                     h[path] = n_feat[self.predict_ntype][path][:predict_nodes_num]
