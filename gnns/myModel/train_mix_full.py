@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from gnns.myModel.model_mix import MyModelFull
 from gnns.utils import (METRICS_STR, add_node_feat, calc_metrics, get_device,
-                        load_data, set_random_seed, hg_preprocess)
+                        load_data, set_random_seed, hg_metapaths)
 
 
 def train(args):
@@ -18,24 +18,19 @@ def train(args):
         load_data(args.dataset, device, reverse_self=False)
     add_node_feat(g, 'one-hot')
     
-    feat_g = hg_preprocess(g.to(torch.device('cpu')), predict_ntype, args.num_layers+1)
+    all_mps = hg_metapaths(g.to(torch.device('cpu')), predict_ntype, args.num_layers+1)
+    layer_metapaths = {
+        l: [] for l in range(args.num_layers)
+    }
+    for mp in all_mps:
+        if len(mp.split('-')) - 2 < 0: continue
+        layer_metapaths[len(mp.split('-'))-2].append(mp)
 
-    # feats = {}
-    # keys = list(feat_g.nodes[predict_ntype].data.keys())
-    # for k in keys:
-    #     feats[k] = feat_g.nodes[predict_ntype].data.pop(k)
-    #     feats[k] = feats[k].to(device)
-    # print(len(feats))
-    # layer_metapaths = [[] for _ in range(args.num_layers)]
-    # for k in keys:
-    #     layer_metapaths[len(k.split('-'))-1].append(k)
-    # feats = None
-    mpnums = len(feat_g.nodes[predict_ntype].data.keys())
-    feat_g = None
+    mpnums = len([mp for mp in all_mps if mp.split('-')[0] == predict_ntype])
 
     model = MyModelFull(
         {ntype: g.nodes[ntype].data['feat'].shape[1] for ntype in g.ntypes}, 
-        args.num_hidden, data.num_classes, g.canonical_etypes, args.num_layers, predict_ntype, mpnums, attn_drop=args.dropout
+        args.num_hidden, data.num_classes, g.canonical_etypes, args.num_layers, predict_ntype, layer_metapaths, mpnums, attn_drop=args.dropout
     ).to(args.device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     warnings.filterwarnings('ignore', 'Setting attributes on ParameterDict is not supported')
@@ -80,7 +75,7 @@ def evaluate(model, g, labels, train_idx, val_idx, test_idx):
 
 def main():
     parser = argparse.ArgumentParser(description="训练模型")
-    parser.add_argument('--device', type=int, default=0, help='GPU 设备')
+    parser.add_argument('--device', type=int, default=3, help='GPU 设备')
     parser.add_argument('--seed', type=int, default=None, help='随机数种子')
     parser.add_argument('--dataset', choices=['acm', 'dblp'], default='acm', help='数据集')
     parser.add_argument('--num-hidden', type=int, default=64, help='The hidden dim')

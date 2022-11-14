@@ -187,3 +187,38 @@ def hg_preprocess(g, predict_ntype, max_hops):
         gc.collect()
     
     return new_g
+
+
+def hg_metapaths(g, predict_ntype, max_hops):
+    mps = set()
+    data = {}
+    for stype, etype, dtype in g.canonical_etypes:
+        u, v = g.edges(etype=(stype, etype, dtype))
+        data[(stype, etype, dtype)] = u, v
+    new_g = dgl.heterograph(data, {ntype: g.num_nodes(ntype) for ntype in g.ntypes})
+    for ntype in g.ntypes:
+        new_g.nodes[ntype].data[ntype] = g.nodes[ntype].data['feat']
+    for etype in g.canonical_etypes:
+        new_g.edges[etype].data.update(g.edges[etype].data)
+    for hop in range(1, max_hops):
+        for stype, etype, dtype in new_g.canonical_etypes:
+            for k in list(new_g.nodes[stype].data.keys()):
+                if len(k.split('-')) == hop:
+                    current_dst_name = f'{dtype}-{k}'
+                    if hop == max_hops-1 and dtype != predict_ntype: continue
+                    new_g[etype].update_all(fn.copy_u(k, 'm'), fn.mean('m', current_dst_name), etype=etype)
+        
+        for ntype in new_g.ntypes:
+            if ntype == predict_ntype: continue
+            removes = []
+            for k in new_g.nodes[ntype].data.keys():
+                if len(k.split('-')) <= hop:
+                    removes.append(k)
+            for k in removes:
+                mps.add(k)
+                new_g.nodes[ntype].data.pop(k)
+        gc.collect()
+    
+    mps = mps.union(new_g.nodes[predict_ntype].data.keys())
+    new_g = None
+    return mps

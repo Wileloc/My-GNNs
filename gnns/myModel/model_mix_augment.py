@@ -115,7 +115,7 @@ class MyModel(nn.Module):
         for ntype in self.fc_in:
             nn.init.xavier_normal_(self.fc_in[ntype].weight, gain)
 
-    def forward(self, blocks, feat):
+    def forward(self, blocks, feat, labels=None):
         '''
         :g DGLGraph 异构图
         :feat 节点特征Dict {ntype: Tensor(N, d_i)}
@@ -145,6 +145,12 @@ class MyModel(nn.Module):
 
         tgt = torch.stack(list(h.values()), dim=1)
         z = self.transformer(tgt, tgt)
+        if labels is not None:
+            augment_labels = torch.unique(labels)
+            augment_z = torch.stack([torch.mean(z[labels == l], dim=0) for l in augment_labels])
+            z = torch.cat((z, augment_z))
+            z = self.predict(z.reshape(z.size()[0], -1))
+            return z, augment_labels
         z = self.predict(z.reshape(z.size()[0], -1))
         return z
 
