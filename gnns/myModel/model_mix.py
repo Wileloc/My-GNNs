@@ -1,4 +1,3 @@
-from turtle import forward
 import torch
 import torch.nn as nn
 from dgl.nn.pytorch.conv import GATConv
@@ -129,6 +128,7 @@ class MyModel(nn.Module):
         for idx, (block, layer) in enumerate(zip(blocks, self.contrast)):
             n_feat = layer(block, n_feat)
             for dtype in n_feat:
+                if dtype == self.predict_ntype: continue
                 remove = []
                 for path in n_feat[dtype]:
                     if len(path.split('-')) - 2 < idx and len(path.split('-')) - 2 >= 0:
