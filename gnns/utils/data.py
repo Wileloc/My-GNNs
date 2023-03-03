@@ -222,3 +222,27 @@ def hg_metapaths(g, predict_ntype, max_hops):
     mps = mps.union(new_g.nodes[predict_ntype].data.keys())
     new_g = None
     return mps
+
+
+def add_label_node(g, predict_ntype, labels, train_idx):
+    data = {}
+    for stype, etype, dtype in g.canonical_etypes:
+        u, v = g.edges(etype=(stype, etype, dtype))
+        data[(stype, etype, dtype)] = u, v
+    data[('label', 'has_rev', predict_ntype)] = labels, train_idx
+    nodes = {ntype: g.num_nodes(ntype) for ntype in g.ntypes}
+    nodes['label'] = len(torch.unique(labels))
+    new_g = dgl.heterograph(data, nodes)
+    for ntype in g.ntypes:
+        new_g.nodes[ntype].data.update(g.nodes[ntype].data)
+    for etype in g.canonical_etypes:
+        new_g.edges[etype].data.update(g.edges[etype].data)
+    new_g.nodes['label'].data['feat'] = torch.eye(new_g.num_nodes('label'), device=g.device)
+    return new_g
+
+def add_label_embedding(g, predict_ntype, labels, train_idx):
+    label_one_hot = torch.eye(len(torch.unique(labels)), device=g.device)
+    label_emb = torch.zeros(g.num_nodes(predict_ntype), len(torch.unique(labels)), device=g.device)
+    label_emb[train_idx] = label_one_hot[labels]
+    paper_emb = g.nodes[predict_ntype].data['feat']
+    g.nodes[predict_ntype].data['feat'] = torch.cat([paper_emb, label_emb], dim=1)

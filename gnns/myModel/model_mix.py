@@ -93,12 +93,12 @@ class ContrastLayer(nn.Module):
     '''
     def __init__(self, in_dim, hidden_dim, metapaths, predict_ntype, num_heads, attn_drop, negative_slope):
         super().__init__()
-        # self.bigraphs = nn.ModuleDict({
-        #     mp: BiGraphContrastLayer(in_dim, hidden_dim, mp.split('-')[0], attn_drop) for mp in metapaths
-        # })
         self.bigraphs = nn.ModuleDict({
-            mp: BiGraphGAT(hidden_dim // num_heads, num_heads, attn_drop, negative_slope, F.relu) for mp in metapaths
+            mp: BiGraphContrastLayer(in_dim, hidden_dim, mp.split('-')[0], attn_drop) for mp in metapaths
         })
+        # self.bigraphs = nn.ModuleDict({
+        #     mp: BiGraphGAT(hidden_dim // num_heads, num_heads, attn_drop, negative_slope, F.relu) for mp in metapaths
+        # })
         self.predict_ntype = predict_ntype
     
     def forward(self, g, feat, layer_idx, max_hops):
@@ -116,28 +116,28 @@ class ContrastLayer(nn.Module):
                 continue
             if dtype not in n_feat:
                 n_feat[dtype] = {dtype: feat[dtype][dtype][:g.num_dst_nodes(dtype)]}
-            # if stype == dtype:
-            #     num_nodes_dict = {stype: g.num_src_nodes(stype)}
-            # else:
-            #     num_nodes_dict = {stype: g.num_src_nodes(stype), dtype: g.num_dst_nodes(dtype)}
-            # bigraph = dgl.heterograph({
-            #     (stype, etype, dtype): g.edges(etype=etype)}, 
-            #     num_nodes_dict=num_nodes_dict
-            # )
-            bigraph = g[stype, etype, dtype]
+            if stype == dtype:
+                num_nodes_dict = {stype: g.num_src_nodes(stype)}
+            else:
+                num_nodes_dict = {stype: g.num_src_nodes(stype), dtype: g.num_dst_nodes(dtype)}
+            bigraph = dgl.heterograph({
+                (stype, etype, dtype): g.edges(etype=etype)}, 
+                num_nodes_dict=num_nodes_dict
+            )
+            # bigraph = g[stype, etype, dtype]
             for s_etype in feat[stype]:
                 if len(s_etype.split('-')) - 1 != layer_idx: continue
                 if stype == dtype:
-                    # bigraph.nodes[stype].data['h'] = feat[stype][s_etype]
-                    n_feat[dtype][dtype+"-"+s_etype] = self.bigraphs[dtype+"-"+s_etype](bigraph, \
-                        feat[stype][s_etype])[:g.num_dst_nodes(dtype)]
+                    bigraph.nodes[stype].data['h'] = feat[stype][s_etype]
+                    # n_feat[dtype][dtype+"-"+s_etype] = self.bigraphs[dtype+"-"+s_etype](bigraph, \
+                        # feat[stype][s_etype])[:g.num_dst_nodes(dtype)]
                 else:
-                    # bigraph.nodes[stype].data['h'] = feat[stype][s_etype]
-                    # bigraph.nodes[dtype].data['h'] = feat[dtype][dtype][:g.num_dst_nodes(dtype)]
-                    n_feat[dtype][dtype+"-"+s_etype] = self.bigraphs[dtype+"-"+s_etype](bigraph, \
-                        (feat[stype][s_etype], feat[dtype][dtype][:g.num_dst_nodes(dtype)]))[:g.num_dst_nodes(dtype)]
+                    bigraph.nodes[stype].data['h'] = feat[stype][s_etype]
+                    bigraph.nodes[dtype].data['h'] = feat[dtype][dtype][:g.num_dst_nodes(dtype)]
+                    # n_feat[dtype][dtype+"-"+s_etype] = self.bigraphs[dtype+"-"+s_etype](bigraph, \
+                        # (feat[stype][s_etype], feat[dtype][dtype][:g.num_dst_nodes(dtype)]))[:g.num_dst_nodes(dtype)]
                 # 二分图目标节点的表示
-                # n_feat[dtype][dtype+"-"+s_etype] = self.bigraphs[dtype+"-"+s_etype](bigraph, feats)[:g.num_dst_nodes(dtype)]
+                n_feat[dtype][dtype+"-"+s_etype] = self.bigraphs[dtype+"-"+s_etype](bigraph)[:g.num_dst_nodes(dtype)]
 
         return n_feat
 
@@ -159,9 +159,6 @@ class MyModel(nn.Module):
         self.fc_in = nn.ModuleDict({
             ntype: nn.Linear(in_dim, hidden_dim) for ntype, in_dim in in_dims.items()
         })
-        # self.contrast = nn.ModuleList(
-        #     [ContrastLayer(hidden_dim, hidden_dim, mps, predict_ntype, attn_drop) for _, mps in layer_metapaths.items()
-        # ])
         self.contrast = nn.ModuleList(
             [ContrastLayer(hidden_dim, hidden_dim, mps, predict_ntype, num_heads, attn_drop, negative_slope) for _, mps in layer_metapaths.items()
         ])

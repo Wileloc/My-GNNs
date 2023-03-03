@@ -4,17 +4,16 @@ import warnings
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
-from gnns.myModel.model_mix import MyModelFull
+from gnns.myModel.model_mix_augment import MyModelFull
 from gnns.utils import (METRICS_STR, add_node_feat, calc_metrics, get_device,
                         load_data, set_random_seed, hg_metapaths)
 
 
 def train(args):
-    torch.autograd.set_detect_anomaly(True)
     if args.seed is not None:
         set_random_seed(args.seed)
     device = get_device(args.device)
-    data, g, _, labels, predict_ntype, train_idx, val_idx, test_idx, evaluator = \
+    data, g, _, labels, predict_ntype, train_idx, val_idx, test_idx, _ = \
         load_data(args.dataset, device, reverse_self=False)
     add_node_feat(g, 'one-hot')
     

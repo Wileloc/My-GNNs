@@ -2,18 +2,40 @@ from torch_geometric.loader import HGTLoader
 from torch_geometric.datasets import OGB_MAG
 import torch_geometric.transforms as T
 import torch
+from tqdm import tqdm
+from gnns.utils import get_device, set_random_seed
 
 import argparse
 
 
-def train():
+def train(args):
+    if args.seed is not None:
+        set_random_seed(args.seed)
+    device = get_device(args.device)
+
     transform = T.ToUndirected(merge=True)
     dataset = OGB_MAG('data/pyg_data/MAG', preprocess='metapath2vec', transform=transform)
+    train_loader = HGTLoader(
+        dataset[0],
+        num_samples={key: [1800] * args.num_layers for key in dataset[0].node_types},
+        batch_size=args.batch_size,
+        input_nodes=('paper', dataset[0]['paper'].train_mask)
+    )
+    # loader = HGTLoader(
+    #     dataset[0],
+    #     num_samples={key: [1800] * args.num_layers for key in dataset[0].node_types},
+    #     batch_size=args.batch_size,
+    #     input_nodes=('paper')
+    # )
+    
+    for batch in tqdm(train_loader):
+        batch = batch.to(device, 'edge_index')
+        print(batch)
 
 
 def main():
     parser = argparse.ArgumentParser(description="训练模型")
-    parser.add_argument('--device', type=int, default=3, help='GPU 设备')
+    parser.add_argument('--device', type=int, default=1, help='GPU 设备')
     parser.add_argument('--seed', type=int, default=0, help='随机数种子')
     parser.add_argument('--dataset', choices=['ogbn-mag', 'oag-venue', 'oag-field'], default='ogbn-mag', help='数据集')
     parser.add_argument('--num-hidden', type=int, default=64, help='The hidden dim')

@@ -1,19 +1,17 @@
 import argparse
 import warnings
-import pandas as pd
 
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
 from tqdm import tqdm
 from dgl.dataloading import MultiLayerNeighborSampler, NodeDataLoader
-from gnns.myModel.model_mix import MyModel
+from gnns.myModel.model_mix_augment import MyModel
 from gnns.utils import (METRICS_STR, add_node_feat, calc_metrics, get_device,
-                        load_data, set_random_seed, hg_metapaths, accuracy)
+                        load_data, set_random_seed, hg_metapaths)
 
 
 def train(args):
-    torch.autograd.set_detect_anomaly(True)
     if args.seed is not None:
         set_random_seed(args.seed)
     device = get_device(args.device)
@@ -57,8 +55,6 @@ def train(args):
         losses = []
         for input_nodes, output_nodes, blocks in tqdm(train_loader):
             train_labels = labels[output_nodes[predict_ntype]]
-            # train_logits, augment_labels = model(blocks, blocks[0].srcdata['feat'], train_labels)
-            # train_labels = torch.cat((train_labels, augment_labels))
             train_logits = model(blocks, blocks[0].srcdata['feat'])
             loss = F.cross_entropy(train_logits, train_labels)
             losses.append(loss.item())
@@ -73,7 +69,6 @@ def train(args):
                 model, loader, g, labels, data.num_classes, predict_ntype,
                 train_idx, val_idx, test_idx, evaluator
             )))
-            torch.save(model.state_dict(), args.save_path)
 
     if args.save_path:
         torch.save(model.state_dict(), args.save_path)
@@ -87,13 +82,13 @@ def evaluate(model, loader, g, labels, num_classes, predict_ntype,
     logits = torch.zeros(g.num_nodes(predict_ntype), num_classes, device=train_idx.device)
     for input_nodes, output_nodes, blocks in loader:
         logits[output_nodes[predict_ntype]] = model(blocks, blocks[0].srcdata['feat'])
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
     return calc_metrics(logits, labels, train_idx, val_idx, test_idx, evaluator)
 
 
 def main():
     parser = argparse.ArgumentParser(description="训练模型")
-    parser.add_argument('--device', type=int, default=0, help='GPU 设备')
+    parser.add_argument('--device', type=int, default=1, help='GPU 设备')
     parser.add_argument('--seed', type=int, default=None, help='随机数种子')
     parser.add_argument('--dataset', choices=['ogbn-mag', 'oag-venue', 'oag-field'], default='ogbn-mag', help='数据集')
     parser.add_argument('--num-hidden', type=int, default=64, help='The hidden dim')
