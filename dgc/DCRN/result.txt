@@ -1,0 +1,44 @@
+DBLP
+baseline
+ACC: 0.8023, NMI: 0.4984, ARI: 0.5472, F1: 0.7990
+
+feature-level N/K改为聚类中心
+ACC: 0.8033, NMI: 0.5001, ARI: 0.5493, F1: 0.7999
+
+feature** + decoder 使用两个view平均
+ACC: 0.8018, NMI: 0.4974, ARI: 0.5465, F1: 0.7983
+
+feature** + sample-level 与聚类结果形成的高置信度矩阵近似 0.8
+ACC: 0.7821, NMI: 0.4695, ARI: 0.5088, F1: 0.7778
+feature** + sample-level 与聚类结果形成的高置信度矩阵近似 0.6
+ACC: 0.7767, NMI: 0.4653, ARI: 0.4969, F1: 0.7717
+
+feature** + two-view结合使用attention
+ACC: 0.8031, NMI: 0.4997, ARI: 0.5488, F1: 0.7996
+
+多阶邻居矩阵相似, feature没用N/K 直接用的N
+ACC: 0.7658, NMI: 0.4467, ARI: 0.4854, F1: 0.7606
+
+decoder用A_norm
+ACC: 0.8016, NMI: 0.4965, ARI: 0.5456, F1: 0.7980
+
+使用Knn视图
+ACC: 0.7949, NMI: 0.4857, ARI: 0.5317, F1: 0.7915
+
+knn视图直接用X构建
+ACC: 0.7966, NMI: 0.4865, ARI: 0.5368, F1: 0.7928
+
+Z_g使用高阶(二阶)邻居 + linear聚合
+ACC: 0.8040, NMI: 0.5019, ARI: 0.5511, F1: 0.8006
+
+ACM
+baseline
+ACC: 0.9174, NMI: 0.7119, ARI: 0.7709, F1: 0.9173
+Z_g使用高阶**
+ACC: 0.9177, NMI: 0.7134, ARI: 0.7719, F1: 0.9176
+
+Citeseer
+baseline
+ACC: 0.7093, NMI: 0.4555, ARI: 0.4750, F1: 0.6579
+Z_g使用高阶**
+ACC: 0.7093, NMI: 0.4555, ARI: 0.4750, F1: 0.6579
