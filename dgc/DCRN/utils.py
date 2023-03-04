@@ -32,7 +32,7 @@ def setup():
     if opt.args.name == 'acm':
         opt.args.n_clusters = 3
         opt.args.n_input = 100
-        opt.args.alpha_value = 0.2
+        opt.args.alpha_value = 0.3
         opt.args.lambda_value = 10
         opt.args.gamma_value = 1e3
         opt.args.lr = 5e-5
@@ -266,8 +266,9 @@ def remove_edge(A, similarity, remove_rate=0.1):
 def knn(A, similarity):
     n_node = A.shape[0]
     for i in range(n_node):
-        A[i, torch.argsort(similarity[i], descending=True)[6:]] = 0
-    Ak = torch.softmax(A, dim=1)
+        A[i, torch.argsort(similarity[i].cpu(), descending=True)[6:]] = 0
+    Ak = normalize_adj(A)
+    Ak = numpy_to_torch(Ak).to(opt.args.device)
     return Ak
 
 
@@ -431,10 +432,10 @@ def dicr_loss(Z_ae, Z_igae, AZ, Z, T):
     S_N_ae = cross_correlation(Z_ae[0], Z_ae[1])
     S_N_igae = cross_correlation(Z_igae[0], Z_igae[1])
     # loss of SCR
-    L_N_ae = correlation_reduction_loss(S_N_ae)
-    L_N_igae = correlation_reduction_loss(S_N_igae)
-    # L_N_ae = improved_correlation_loss(S_N_ae, T)
-    # L_N_igae = improved_correlation_loss(S_N_igae, T)
+    # L_N_ae = correlation_reduction_loss(S_N_ae)
+    # L_N_igae = correlation_reduction_loss(S_N_igae)
+    L_N_ae = improved_correlation_loss(S_N_ae, T)
+    L_N_igae = improved_correlation_loss(S_N_igae, T)
 
     # Feature-level Correlation Reduction (FCR)
     # cross-view feature correlation matrix
@@ -542,22 +543,28 @@ def eva(y_true, y_pred, show_details=True):
     return acc, nmi, ari, f1
 
 
-def high_confidence(Z, z_centers, Z_labels, threshold=0.1):
+def high_confidence(Z, z_centers, Z_labels=None, threshold=0.1):
     # Z^2
-    z_square = (Z * Z).sum(-1)
+    z_square = (Z * Z).sum(-1).reshape(-1, 1).repeat(1, z_centers.shape[0])
     # C^2
-    z_centers = z_centers[Z_labels]
-    c_square = (z_centers * z_centers).sum(-1)
+    # z_centers = z_centers[Z_labels]
+    c_square = (z_centers * z_centers).sum(-1).reshape(1, -1).repeat(Z.shape[0], 1)
     zpc_square = z_square + c_square
-    zmc = (Z * z_centers).sum(-1)
+    # zmc = (Z * z_centers).sum(-1)
+    zmc = Z @ z_centers.t()
     distance = zpc_square - 2 * zmc
+    distance = torch.min(F.softmax(distance, dim=1), dim=1)
+    dis_labels = distance.indices
+    # Z_labels = Z_labels.to(opt.args.device)
+    # print(torch.sum(dis_labels == Z_labels))
+    values = torch.topk(distance.values, int(Z.shape[0] * 0.4)).values
     # values = torch.topk(distance, int(Z.shape[0] * 0.4)).values
     hc = 0
-    for i in torch.unique(Z_labels):
-        condition1 = distance<=threshold
-        condition2 = (Z_labels==i).to(condition1.device)
+    for i in torch.unique(dis_labels):
+        condition1 = distance.values<=values[-1]
+        condition2 = (dis_labels==i).to(condition1.device)
         mask_i = torch.where(condition1 & condition2, \
-            torch.ones_like(distance), torch.zeros_like(distance))
+            torch.ones_like(distance.values), torch.zeros_like(distance.values))
         mask_i = torch.unsqueeze(mask_i, dim=0)
         hc += mask_i.t() @ mask_i
-    return hc
+    return hc, dis_labels

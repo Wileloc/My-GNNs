@@ -31,14 +31,25 @@ ACC: 0.7966, NMI: 0.4865, ARI: 0.5368, F1: 0.7928
 Z_g使用高阶(二阶)邻居 + linear聚合
 ACC: 0.8040, NMI: 0.5019, ARI: 0.5511, F1: 0.8006
 
+Z_g使用高阶** + sample-level 与聚类结果形成的高置信度矩阵近似 0.6 + knn视图
+ACC: 0.8035, NMI: 0.5034, ARI: 0.5525, F1: 0.7935
+
+⬆️再加feature-level使用pseudo标签
+ACC: 0.8060, NMI: 0.5085, ARI: 0.5549, F1: 0.7975
+
 ACM
 baseline
 ACC: 0.9174, NMI: 0.7119, ARI: 0.7709, F1: 0.9173
 Z_g使用高阶**
 ACC: 0.9177, NMI: 0.7134, ARI: 0.7719, F1: 0.9176
 
+ACC: 0.9230, NMI: 0.7238, ARI: 0.7846, F1: 0.9231
+
 Citeseer
 baseline
 ACC: 0.7093, NMI: 0.4555, ARI: 0.4750, F1: 0.6579
 Z_g使用高阶**
 ACC: 0.7093, NMI: 0.4555, ARI: 0.4750, F1: 0.6579
+
+Z_g使用高阶** + sample-level 与聚类结果形成的高置信度矩阵近似 0.6 + knn视图 + feature-level使用pseudo标签
+ACC: 0.7193, NMI: 0.4638, ARI: 0.4784, F1: 0.6244

@@ -273,8 +273,8 @@ class DCRN(nn.Module):
         nn.init.xavier_normal_(self.project.weight)
 
         # fusion parameter for two views
-        # self.ae_a = Parameter(nn.init.constant_(torch.zeros(n_node, opt.args.n_z), 0.5), requires_grad=True)
-        # self.igae_a = Parameter(nn.init.constant_(torch.zeros(n_node, opt.args.n_z), 0.5), requires_grad=True)
+        self.ae_a = Parameter(nn.init.constant_(torch.zeros(n_node, opt.args.n_z), 0.5), requires_grad=True)
+        self.igae_a = Parameter(nn.init.constant_(torch.zeros(n_node, opt.args.n_z), 0.5), requires_grad=True)
 
         # cluster layer (clustering assignment matrix)
         self.cluster_centers = Parameter(torch.Tensor(opt.args.n_clusters, opt.args.n_z), requires_grad=True)
@@ -354,10 +354,10 @@ class DCRN(nn.Module):
         # A_hat = Z_adj_hat
 
         # node embedding and cluster-level embedding
-        Z_ae_all = [Z_ae1, Z_ae2, Z_tilde_ae1, Z_tilde_ae2]
-        Z_gae_all = [Z_igae1, Z_igae2, Z_tilde_igae1, Z_tilde_igae2]
-        # Z_ae_all = [Z_ae1, Z_ae2, Z_ae1, Z_ae2]
-        # Z_gae_all = [Z_igae1, Z_igae2, Z_igae1, Z_igae2]
+        # Z_ae_all = [Z_ae1, Z_ae2, Z_tilde_ae1, Z_tilde_ae2]
+        # Z_gae_all = [Z_igae1, Z_igae2, Z_tilde_igae1, Z_tilde_igae2]
+        Z_ae_all = [Z_ae1, Z_ae2]
+        Z_gae_all = [Z_igae1, Z_igae2]
 
         # the soft assignment distribution Q
         Q = self.q_distribute(Z, Z_ae, Z_igae)
