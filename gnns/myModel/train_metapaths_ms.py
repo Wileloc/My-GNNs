@@ -106,7 +106,7 @@ def main():
     parser = argparse.ArgumentParser(description="训练模型")
     parser.add_argument('--device', type=int, default=1, help='GPU 设备')
     parser.add_argument('--seed', type=int, default=None, help='随机数种子')
-    parser.add_argument('--dataset', choices=['ogbn-mag', 'oag-venue', 'oag-field'], default='ogbn-mag', help='数据集')
+    parser.add_argument('--dataset', choices=['ogbn-mag', 'oag-venue'], default='ogbn-mag', help='数据集')
     parser.add_argument('--num-hidden', type=int, default=64, help='The hidden dim')
     parser.add_argument('--num-layers', type=int, default=3, help='层数')
     parser.add_argument('--dropout', type=float, default=0.5, help='Dropout概率')

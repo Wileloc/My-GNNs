@@ -142,23 +142,34 @@ class MyModel(nn.Module):
         feat = {
             dtype: {dtype: self.fc_in[dtype](feat[dtype])} for dtype in feat
         }
-        label_emb = feat['label']['label']
 
         h = {
             self.predict_ntype: feat[self.predict_ntype][self.predict_ntype][:predict_nodes_num]
         }
-        for b in blocks:
-            r_e = b.in_edges(blocks[-1].dstnodes(self.predict_ntype), etype='has_rev', form='eid')
-            b.remove_edges(r_e, etype='has_rev') 
-        for idx, (block, layer) in enumerate(zip(blocks, self.contrast)):
-            feat = layer(block, feat, idx, len(self.contrast))
-            feat['label'] = {'label': label_emb}
-            for path in feat[self.predict_ntype]:
-                if len(path.split('-')) - 2 == idx:
-                    h[path] = feat[self.predict_ntype][path][:predict_nodes_num]
+        if 'label' in feat:
+            label_emb = feat['label']['label']
+            for b in blocks:
+                r_e = b.in_edges(blocks[-1].dstnodes(self.predict_ntype), etype='has_rev', form='eid')
+                b.remove_edges(r_e, etype='has_rev') 
+            for idx, (block, layer) in enumerate(zip(blocks, self.contrast)):
+                feat = layer(block, feat, idx, len(self.contrast))
+                feat['label'] = {'label': label_emb}
+                for path in feat[self.predict_ntype]:
+                    if len(path.split('-')) - 2 == idx:
+                        h[path] = feat[self.predict_ntype][path][:predict_nodes_num]
+        else:
+            for idx, (block, layer) in enumerate(zip(blocks, self.contrast)):
+                feat = layer(block, feat, idx, len(self.contrast))
+                for path in feat[self.predict_ntype]:
+                    if len(path.split('-')) - 2 == idx:
+                        h[path] = feat[self.predict_ntype][path][:predict_nodes_num]
 
-        h.pop('paper-label')
-        z = {stype: torch.stack([h[s] for s in h if s.split('-')[-1] == stype], dim=1) for stype in self.fc_in.keys()}
+        if self.predict_ntype+'-label' in h:
+            h.pop(self.predict_ntype+'-label')
+        z = {
+            stype: torch.stack([h[s] for s in h if s.split('-')[-1] == stype], dim=1) 
+            for stype in self.fc_in.keys()
+        }
         z = [self.transformer_node[s](z_i, z_i) for s, z_i in z.items()]
         z = torch.cat(z, dim=1)
         z = self.transformer_sum(z, z)

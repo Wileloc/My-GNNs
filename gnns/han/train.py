@@ -51,12 +51,8 @@ def train(args):
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     score = micro_macro_f1_score
-    if args.task == 'clf':
-        metrics = 'Epoch {:d} | Train Loss {:.4f} | Train Micro-F1 {:.4f} | Train Macro-F1 {:.4f}' \
-                  ' | Val Micro-F1 {:.4f} | Val Macro-F1 {:.4f}'
-    else:
-        metrics = 'Epoch {:d} | Train Loss {:.4f} | Train NMI {:.4f} | Train ARI {:.4f}' \
-                  ' | Val NMI {:.4f} | Val ARI {:.4f}'
+    metrics = 'Epoch {:d} | Train Loss {:.4f} | Train Micro-F1 {:.4f} | Train Macro-F1 {:.4f}' \
+        ' | Val Micro-F1 {:.4f} | Val Macro-F1 {:.4f}'
     for epoch in range(args.epochs):
         model.train()
         logits = model(gs, features)
@@ -70,10 +66,7 @@ def train(args):
         print(metrics.format(epoch, loss.item(), *train_metrics, *val_metrics))
 
     test_metrics = evaluate(model, gs, features, labels, test_mask, score)
-    if args.task == 'clf':
-        print('Test Micro-F1 {:.4f} | Test Macro-F1 {:.4f}'.format(*test_metrics))
-    else:
-        print('Test NMI {:.4f} | Test ARI {:.4f}'.format(*test_metrics))
+    print('Test Micro-F1 {:.4f} | Test Macro-F1 {:.4f}'.format(*test_metrics))
 
 
 def evaluate(model, gs, features, labels, mask, score):
